@@ -132,9 +132,35 @@ void GlobalDCEPass::UpdateGVDependencies(GlobalValue &GV) {
     // though this vtable, then skip it, because the call site information will
     // be more precise.
     if (VFESafeVTables.count(GVU) && isa<Function>(&GV)) {
-      LLVM_DEBUG(dbgs() << "Ignoring dep " << GVU->getName() << " -> "
-                        << GV.getName() << "\n");
-      continue;
+      bool OffsetFound = false;
+      if (auto VTable = dyn_cast<GlobalVariable>(GVU)) {
+        // Gather the !type metadata
+        SmallVector<MDNode *, 2> Types;
+        VTable->getMetadata(LLVMContext::MD_type, Types);
+        if (VTable->isDeclaration() || Types.empty())
+          continue;
+
+        // Check if the offset is found
+        for (MDNode *Type : Types) {
+          uint64_t OffsetInType =
+              cast<ConstantInt>(
+                  cast<ConstantAsMetadata>(Type->getOperand(0))->getValue())
+                  ->getZExtValue();
+          Constant *Ptr = getPointerAtOffset(
+              VTable->getInitializer(), OffsetInType, *VTable->getParent());
+          Ptr = Ptr ? Ptr->stripPointerCasts() : nullptr;
+          if (Ptr == &GV) {
+            OffsetFound = true;
+            break;
+          }
+        }
+      }
+
+      if (OffsetFound) {
+        LLVM_DEBUG(dbgs() << "Ignoring dep " << GVU->getName() << " -> "
+                          << GV.getName() << "\n");
+        continue;
+      }
     }
     GVDependencies[GVU].insert(&GV);
   }
@@ -213,20 +239,44 @@ void GlobalDCEPass::ScanVTableLoad(Function *Caller, Metadata *TypeId,
                            *Caller->getParent());
     if (!Ptr) {
       LLVM_DEBUG(dbgs() << "can't find pointer in vtable!\n");
+      LLVM_DEBUG(dbgs() << "TypeId: " << *TypeId << "\n");
+      LLVM_DEBUG(dbgs() << "VTableOffset: " << VTableOffset << "\n");
+      LLVM_DEBUG(dbgs() << "CallOffset: " << CallOffset << "\n");
+      LLVM_DEBUG(dbgs() << "VTable: " << *VTable << "\n");
       VFESafeVTables.erase(VTable);
+      abort();
       return;
     }
 
-    auto Callee = dyn_cast<Function>(Ptr->stripPointerCasts());
-    if (!Callee) {
+    if (auto Callee = dyn_cast<Function>(Ptr->stripPointerCasts())) {
+      LLVM_DEBUG(dbgs() << "vfunc dep " << Caller->getName() << " -> "
+                        << Callee->getName() << "\n");
+      GVDependencies[Caller].insert(Callee);
+    } else if (auto Callee =
+                   dyn_cast<GlobalVariable>(Ptr->stripPointerCasts())) {
+      if (Callee->getName().endswith(".ptrauth")) {
+        GVDependencies[Caller].insert(Callee);
+      } else {
+        LLVM_DEBUG(dbgs() << "GV but not ptrauth!\n");
+        LLVM_DEBUG(dbgs() << *Caller << "\n");
+        LLVM_DEBUG(dbgs() << *Ptr << "\n");
+        LLVM_DEBUG(dbgs() << *(Ptr->stripPointerCasts()) << "\n");
+        LLVM_DEBUG(dbgs() << "VTableOffset: " << VTableOffset << "\n");
+        LLVM_DEBUG(dbgs() << "CallOffset: " << CallOffset << "\n");
+        LLVM_DEBUG(dbgs() << "VTable: " << *VTable << "\n");
+        abort();
+      }
+    } else if (auto CI = dyn_cast<ConstantInt>(Ptr)) {
+      continue;
+    } else {
       LLVM_DEBUG(dbgs() << "vtable entry is not function pointer!\n");
+      LLVM_DEBUG(dbgs() << *Ptr << "\n");
+      LLVM_DEBUG(dbgs() << *(Ptr->stripPointerCasts()) << "\n");
+      abort();
+
       VFESafeVTables.erase(VTable);
       return;
     }
-
-    LLVM_DEBUG(dbgs() << "vfunc dep " << Caller->getName() << " -> "
-                      << Callee->getName() << "\n");
-    GVDependencies[Caller].insert(Callee);
   }
 }
 
