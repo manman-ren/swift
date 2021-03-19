@@ -286,6 +286,44 @@ void GlobalDCEPass::AddVirtualFunctionDependencies(Module &M) {
   );
 }
 
+static int compareNames(Constant *const *A, Constant *const *B) {
+  Value *AStripped = (*A)->stripPointerCasts();
+  Value *BStripped = (*B)->stripPointerCasts();
+  return AStripped->getName().compare(BStripped->getName());
+}
+
+static GlobalVariable *
+setUsedInitializer(GlobalVariable &V,
+                   const SmallPtrSetImpl<GlobalValue *> &Init) {
+  if (Init.empty()) {
+    V.eraseFromParent();
+    return nullptr;
+  }
+
+  // Type of pointer to the array of pointers.
+  PointerType *Int8PtrTy = Type::getInt8PtrTy(V.getContext(), 0);
+
+  SmallVector<Constant *, 8> UsedArray;
+  for (GlobalValue *GV : Init) {
+    Constant *Cast =
+        ConstantExpr::getPointerBitCastOrAddrSpaceCast(GV, Int8PtrTy);
+    UsedArray.push_back(Cast);
+  }
+  // Sort to get deterministic order.
+  array_pod_sort(UsedArray.begin(), UsedArray.end(), compareNames);
+  ArrayType *ATy = ArrayType::get(Int8PtrTy, UsedArray.size());
+
+  Module *M = V.getParent();
+  V.removeFromParent();
+  GlobalVariable *NV =
+      new GlobalVariable(*M, ATy, false, GlobalValue::AppendingLinkage,
+                         ConstantArray::get(ATy, UsedArray), "");
+  NV->takeName(&V);
+  NV->setSection("llvm.metadata");
+  delete &V;
+  return NV;
+}
+
 PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool Changed = false;
 
@@ -314,6 +352,42 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
   // Add dependencies between virtual call sites and the virtual functions they
   // might call, if we have that information.
   AddVirtualFunctionDependencies(M);
+
+  auto *LTOPostLinkMD =
+      cast_or_null<ConstantAsMetadata>(M.getModuleFlag("LTOPostLink"));
+  bool LTOPostLink =
+      LTOPostLinkMD &&
+      (cast<ConstantInt>(LTOPostLinkMD->getValue())->getZExtValue() != 0);
+
+  auto *Used = M.getGlobalVariable("llvm.used");
+  auto *UsedConditional = M.getNamedMetadata("llvm.used.conditional");
+  if (UsedConditional && UsedConditional->getNumOperands() == 0)
+    UsedConditional = nullptr;
+  SmallPtrSet<GlobalValue *, 8> NewUsedArray;
+  if (LTOPostLink && Used) {
+    // Construct a set of conditionally used targets.
+    SmallPtrSet<GlobalValue *, 8> UsedConditionalTargets;
+    if (UsedConditional) {
+      for (auto *M : UsedConditional->operands()) {
+        assert(M->getNumOperands() == 3);
+        auto *V = mdconst::extract_or_null<GlobalValue>(M->getOperand(0));
+        if (!V)
+          continue;
+        UsedConditionalTargets.insert(V);
+      }
+    }
+
+    // Strip away all conditionally used targets from @llvm.used.
+    const ConstantArray *Init = cast<ConstantArray>(Used->getInitializer());
+    for (Value *Op : Init->operands()) {
+      GlobalValue *G = cast<GlobalValue>(Op->stripPointerCasts());
+      // G is one of the conditional targets, don't mark it as live.
+      if (UsedConditionalTargets.contains(G))
+        continue;
+      NewUsedArray.insert(G);
+    }
+    Used = setUsedInitializer(*Used, NewUsedArray);
+  }
 
   // Loop over the module, adding globals which are obviously necessary.
   for (GlobalObject &GO : M.global_objects()) {
@@ -348,7 +422,101 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     UpdateGVDependencies(GIF);
   }
 
-  // Propagate liveness from collected Global Values through the computed
+  {
+    // Propagate liveness from collected Global Values through the computed
+    // dependencies.
+    SmallVector<GlobalValue *, 8> NewLiveGVs{AliveGlobals.begin(),
+                                             AliveGlobals.end()};
+    while (!NewLiveGVs.empty()) {
+      GlobalValue *LGV = NewLiveGVs.pop_back_val();
+      for (auto *GVD : GVDependencies[LGV]) {
+        // errs() << LGV->getName() << " live therefore also alive: " <<
+        // GVD->getName() << "\n";
+        MarkLive(*GVD, &NewLiveGVs);
+      }
+    }
+  }
+
+  bool VerboseUsedConditional = getenv("VERBOSE_USED_CONDITIONAL") != nullptr;
+
+  if (LTOPostLink && Used && UsedConditional) {
+    if (VerboseUsedConditional)
+      errs() << "Optimizing UsedConditional"
+             << "\n";
+    for (auto *M : UsedConditional->operands()) {
+      assert(M->getNumOperands() == 3);
+      auto *V = mdconst::extract_or_null<GlobalValue>(M->getOperand(0));
+      if (!V)
+        continue;
+      auto *T = mdconst::extract_or_null<ConstantInt>(M->getOperand(1));
+      if (!T)
+        continue;
+      APInt type = T->getValue();
+
+      SmallPtrSet<GlobalValue *, 8> Others;
+      if (M->getOperand(2) == nullptr) {
+        Others.insert(nullptr);
+      } else {
+        if (auto *SingleOther =
+                mdconst::dyn_extract_or_null<GlobalValue>(M->getOperand(2))) {
+          Others.insert(SingleOther);
+        } else {
+          Metadata *MultipleOthers = M->getOperand(2).get();
+          MDNode *node = dyn_cast_or_null<MDNode>(MultipleOthers);
+          for (auto &x : node->operands()) {
+            auto *y = x.get();
+            if (!y)
+              continue;
+#ifndef NDEBUG
+            if (VerboseUsedConditional)
+              y->dump();
+#endif
+            auto *C = mdconst::extract_or_null<Constant>(y);
+            C = C->stripPointerCasts();
+            auto *O = cast<GlobalValue>(C);
+            Others.insert(O);
+          }
+        }
+      }
+
+      bool allOthersAlive = true;
+      bool anyOtherAlive = false;
+      if (VerboseUsedConditional)
+        errs() << "Conditional: " << V->getName() << "\n";
+      for (auto *GV : Others) {
+        bool live = AliveGlobals.count(GV) != 0;
+        if (live)
+          if (VerboseUsedConditional)
+            errs() << "  <- " << GV->getName() << "\n";
+        if (live)
+          anyOtherAlive = true;
+        else
+          allOthersAlive = false;
+      }
+
+      if (type == 0) {
+        if (anyOtherAlive) {
+          // errs() << "  LIVE" << "\n";
+          NewUsedArray.insert(V);
+          MarkLive(*V);
+        }
+      } else if (type == 1) {
+        if (allOthersAlive) {
+          // errs() << "  LIVE" << "\n";
+          NewUsedArray.insert(V);
+          MarkLive(*V);
+        }
+      }
+    }
+
+    Used = setUsedInitializer(*Used, NewUsedArray);
+    MarkLive(*Used);
+
+    // M.eraseNamedMetadata(UsedConditional);
+  }
+
+  {
+    // Propagate liveness from collected Global Values through the computed
   // dependencies.
   SmallVector<GlobalValue *, 8> NewLiveGVs{AliveGlobals.begin(),
                                            AliveGlobals.end()};
@@ -356,6 +524,7 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     GlobalValue *LGV = NewLiveGVs.pop_back_val();
     for (auto *GVD : GVDependencies[LGV])
       MarkLive(*GVD, &NewLiveGVs);
+  }
   }
 
   // Now that all globals which are needed are in the AliveGlobals set, we loop
