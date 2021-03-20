@@ -851,7 +851,16 @@ namespace {
       }
 
       for (auto &entry : pi.getWitnessEntries()) {
-        if (Resilient) {
+      if (IGM.getOptions().WTableMethodElimination) {
+        if (entry.isFunction()) {
+          SILDeclRef func(entry.getFunction());
+          auto entity = LinkEntity::forMethodDescriptor(func);
+          auto mangled = entity.mangleAsString();
+          emitCheckedLoadStub(IGM, mangled);
+        }
+      }
+
+      if (Resilient) {
           if (entry.isFunction()) {
             // Define the method descriptor.
             SILDeclRef func(entry.getFunction());
