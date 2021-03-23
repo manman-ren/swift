@@ -938,8 +938,14 @@ namespace {
             entry.getAssociatedTypeWitness().Requirement != assocType)
           continue;
 
-        auto witness =
-            entry.getAssociatedTypeWitness().Witness->mapTypeOutOfContext();
+      if (IGM.getOptions().EnableAssociatedTypeAccessors) { //
+        auto w = entry.getAssociatedTypeWitness().Witness;
+        return getDefaultAssociatedTypeMetadataAccessFunction(
+            AssociatedType(assocType), w);
+      }
+
+      auto witness =
+          entry.getAssociatedTypeWitness().Witness->mapTypeOutOfContext();
         return IGM.getAssociatedTypeWitness(witness,
                                             Proto->getGenericSignature(),
                                             /*inProtocolContext=*/true);
@@ -948,8 +954,43 @@ namespace {
       return nullptr;
     }
 
-    llvm::Constant *findDefaultAssociatedConformanceWitness(
-                                                  CanType association,
+  llvm::Constant *
+  getDefaultAssociatedTypeMetadataAccessFunction(AssociatedType requirement,
+                                                 CanType witness) {
+    auto accessor =
+        IGM.getAddrOfDefaultAssociatedTypeMetadataAccessFunction(requirement);
+
+    IRGenFunction IGF(IGM, accessor);
+    if (IGM.DebugInfo)
+      IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
+
+    Explosion parameters = IGF.collectParameters();
+    auto request = DynamicMetadataRequest(parameters.claimNext());
+
+    llvm::Value *self = parameters.claimNext();
+    llvm::Value *wtable = parameters.claimNext();
+
+    CanType selfInContext =
+        Proto->mapTypeIntoContext(Proto->getProtocolSelfType())
+            ->getCanonicalType();
+
+    // Bind local Self type data from the metadata argument.
+    IGF.bindLocalTypeDataFromTypeMetadata(selfInContext, IsExact, self,
+                                          MetadataState::Abstract);
+    IGF.setUnscopedLocalTypeData(
+        selfInContext,
+        LocalTypeDataKind::forAbstractProtocolWitnessTable(Proto), wtable);
+
+    // Emit a reference to the type metadata.
+    auto response = IGF.emitTypeMetadataRef(witness, request);
+    response.ensureDynamicState(IGF);
+    auto returnValue = response.combine(IGF);
+    IGF.Builder.CreateRet(returnValue);
+    return accessor;
+  }
+
+  llvm::Constant *
+  findDefaultAssociatedConformanceWitness(CanType association,
                                                   ProtocolDecl *requirement) {
       if (!DefaultWitnesses) return nullptr;
 

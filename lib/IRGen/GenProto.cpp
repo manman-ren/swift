@@ -1377,8 +1377,22 @@ public:
 
       auto associate =
           Conformance.getTypeWitness(requirement.getAssociation());
+
+    if (IGM.getOptions().EnableAssociatedTypeAccessors) { //
+      auto canAssociate =
+          ConformanceInContext.getTypeWitness(requirement.getAssociation())
+              ->getCanonicalType();
+      llvm::Constant *metadataAccessFunction =
+          getAssociatedTypeMetadataAccessFunction(requirement, canAssociate);
       llvm::Constant *witness =
-          IGM.getAssociatedTypeWitness(
+          llvm::ConstantExpr::getBitCast(metadataAccessFunction, IGM.Int8PtrTy);
+      auto &schema =
+          IGM.getOptions().PointerAuth.ProtocolAssociatedTypeAccessFunctions;
+      Table.addSignedPointer(witness, schema, requirement);
+      return;
+    }
+
+    llvm::Constant *witness = IGM.getAssociatedTypeWitness(
             associate,
             Conformance.getDeclContext()->getGenericSignatureOfContext(),
             /*inProtocolContext=*/false);
@@ -1389,11 +1403,213 @@ public:
       Table.addSignedPointer(witness, schema, requirement);
     }
 
+  // Return the address of a function which will return the type metadata
+  // for an associated type.
+  llvm::Constant *
+  getAssociatedTypeMetadataAccessFunction(AssociatedType requirement,
+                                          CanType associatedType) {
+    // If the associated type is non-dependent, we can use an ordinary
+    // metadata access function.  We'll just end up passing extra arguments.
+    bool hasArchetype = associatedType->hasArchetype();
+    if (!hasArchetype) {
+      return getOrCreateTypeMetadataAccessFunction(IGM, associatedType);
+    }
+
+    // Otherwise, emit an access function.
+    llvm::Function *accessor =
+        IGM.getAddrOfAssociatedTypeMetadataAccessFunction(
+            Conformance.getRootNormalConformance(), requirement);
+    if (IGM.getOptions().optimizeForSize())
+      accessor->addFnAttr(llvm::Attribute::NoInline);
+
+    IRGenFunction IGF(IGM, accessor);
+    if (IGM.DebugInfo)
+      IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
+
+    Explosion parameters = IGF.collectParameters();
+    auto request = DynamicMetadataRequest(parameters.claimNext());
+
+    llvm::Value *self = parameters.claimNext();
+    setTypeMetadataName(IGM, self, ConcreteType);
+
+    Address destTable(parameters.claimNext(), IGM.getPointerAlignment());
+    setProtocolWitnessTableName(IGM, destTable.getAddress(), ConcreteType,
+                                requirement.getSourceProtocol());
+
+    // If the type witness does not involve any type parameters, directly
+    // reference the type metadata. We only needed a thunk so it could be
+    // relatively referenced.
+    if (!hasArchetype) {
+      auto response = IGF.emitTypeMetadataRef(associatedType, request);
+      response.ensureDynamicState(IGF);
+      auto returnValue = response.combine(IGF);
+      IGF.Builder.CreateRet(returnValue);
+      return accessor;
+    }
+
+    IGF.bindLocalTypeDataFromSelfWitnessTable(
+        &Conformance, destTable.getAddress(), [&](CanType type) {
+          return Conformance.getDeclContext()
+              ->mapTypeIntoContext(type)
+              ->getCanonicalType();
+        });
+
+    // If the associated type is directly fulfillable from the type,
+    // we don't need a cache entry.
+    // TODO: maybe we should have a cache entry anyway if the fulfillment
+    // is expensive.
+    if (auto fulfillment =
+            getFulfillmentMap().getTypeMetadata(associatedType)) {
+      // We don't know that 'self' is any better than an abstract metadata here.
+      auto source = MetadataResponse::forBounded(self, MetadataState::Abstract);
+
+      MetadataResponse response = fulfillment->Path.followFromTypeMetadata(
+          IGF, ConcreteType, source, request, /*cache*/ nullptr);
+      response.ensureDynamicState(IGF);
+      auto returnValue = response.combine(IGF);
+      IGF.Builder.CreateRet(returnValue);
+      return accessor;
+    }
+
+    // Bind local type data from the metadata argument.
+    IGF.bindLocalTypeDataFromTypeMetadata(ConcreteType, IsExact, self,
+                                          MetadataState::Abstract);
+
+    // For now, assume that an associated type is cheap enough to access
+    // that it doesn't need a new cache entry.
+    if (auto archetype = dyn_cast<ArchetypeType>(associatedType)) {
+      auto response = emitArchetypeTypeMetadataRef(IGF, archetype, request);
+      response.ensureDynamicState(IGF);
+      auto returnValue = response.combine(IGF);
+      IGF.Builder.CreateRet(returnValue);
+      return accessor;
+    }
+
+    // Otherwise, we need a cache entry.
+    emitReturnOfCheckedLoadFromCache(
+        IGF, destTable, self, [&]() -> MetadataResponse {
+          return IGF.emitTypeMetadataRef(associatedType, request);
+        });
+
+    return accessor;
+  }
+
   unsigned NextPrivateDataIndex = 0;
 
   unsigned getNextPrivateDataIndex() { return NextPrivateDataIndex++; }
 
   unsigned getTablePrivateSize() { return NextPrivateDataIndex; }
+
+  Address getAddressOfPrivateDataSlot(IRGenFunction &IGF, Address table,
+                                      unsigned index) {
+    assert(index < NextPrivateDataIndex);
+    return IGF.Builder.CreateConstArrayGEP(
+        table, privateWitnessTableIndexToTableOffset(index),
+        IGF.IGM.getPointerSize());
+  }
+
+  void emitReturnOfCheckedLoadFromCache(
+      IRGenFunction &IGF, Address destTable, llvm::Value *selfMetadata,
+      llvm::function_ref<MetadataResponse()> body) {
+    // Allocate a new cache slot and drill down to it.
+    auto cache =
+        getAddressOfPrivateDataSlot(IGF, destTable, getNextPrivateDataIndex());
+
+    llvm::Type *expectedTy = IGF.CurFn->getReturnType();
+
+    bool isReturningResponse = false;
+    if (expectedTy == IGF.IGM.TypeMetadataResponseTy) {
+      isReturningResponse = true;
+      expectedTy = IGF.IGM.TypeMetadataPtrTy;
+    }
+    cache = IGF.Builder.CreateBitCast(cache, expectedTy->getPointerTo());
+
+    // Load and check whether it was null.
+    auto cachedResult = IGF.Builder.CreateLoad(cache);
+    // TODO: When LLVM supports Consume, we should use it here.
+    if (IGF.IGM.IRGen.Opts.Sanitizers & SanitizerKind::Thread)
+      cachedResult->setOrdering(llvm::AtomicOrdering::Acquire);
+    auto cacheIsEmpty = IGF.Builder.CreateIsNull(cachedResult);
+    llvm::BasicBlock *fetchBB = IGF.createBasicBlock("fetch");
+    llvm::BasicBlock *contBB = IGF.createBasicBlock("cont");
+    llvm::BasicBlock *entryBB = IGF.Builder.GetInsertBlock();
+    IGF.Builder.CreateCondBr(cacheIsEmpty, fetchBB, contBB);
+
+    unsigned expectedPHICount = (isReturningResponse ? 3 : 2);
+
+    // Create a phi in the continuation block and use the loaded value if
+    // we branched directly here.  Note that we arrange blocks so that we
+    // fall through into this.
+    IGF.Builder.emitBlock(contBB);
+    llvm::PHINode *result = IGF.Builder.CreatePHI(expectedTy, expectedPHICount);
+    result->addIncoming(cachedResult, entryBB);
+
+    llvm::Constant *completedState = nullptr;
+    llvm::PHINode *resultState = nullptr;
+    if (isReturningResponse) {
+      completedState = MetadataResponse::getCompletedState(IGF.IGM);
+
+      resultState = IGF.Builder.CreatePHI(IGF.IGM.SizeTy, expectedPHICount);
+      resultState->addIncoming(completedState, entryBB);
+
+      llvm::Value *returnValue =
+          MetadataResponse(result, resultState, MetadataState::Abstract)
+              .combine(IGF);
+      IGF.Builder.CreateRet(returnValue);
+    } else {
+      IGF.Builder.CreateRet(result);
+    }
+
+    // In the fetch block, evaluate the body.
+    IGF.Builder.emitBlock(fetchBB);
+    MetadataResponse response = body();
+
+    // The way we jam witness tables into this infrastructure involves
+    // pretending that they're statically-complete metadata.
+    assert(isReturningResponse || response.isStaticallyKnownComplete());
+
+    llvm::Value *fetchedState = nullptr;
+    if (isReturningResponse) {
+      response.ensureDynamicState(IGF);
+      fetchedState = response.getDynamicState();
+    }
+
+    llvm::Value *fetchedResult = response.getMetadata();
+
+    // Skip caching if we're working with responses and the fetched result
+    // is not complete.
+    if (isReturningResponse && !response.isStaticallyKnownComplete()) {
+      auto isCompleteBB = IGF.createBasicBlock("is_complete");
+      auto isComplete = IGF.Builder.CreateICmpEQ(fetchedState, completedState);
+
+      auto fetchingBB = IGF.Builder.GetInsertBlock();
+      IGF.Builder.CreateCondBr(isComplete, isCompleteBB, contBB);
+      result->addIncoming(fetchedResult, fetchingBB);
+      resultState->addIncoming(fetchedState, fetchingBB);
+
+      IGF.Builder.emitBlock(isCompleteBB);
+
+      // If the fetched result is statically known to be complete, there is no
+      // patch which involves not returning the completed state, so destroy the
+      // PHI node we created for the state.
+    } else if (isReturningResponse) {
+      resultState->replaceAllUsesWith(completedState);
+      resultState->eraseFromParent();
+      resultState = nullptr;
+    }
+
+    // Store the fetched result back to the cache.
+    // We need to transitively ensure that any stores initializing the result
+    // that are visible to us are visible to callers.
+    IGF.Builder.CreateStore(fetchedResult, cache)
+        ->setOrdering(llvm::AtomicOrdering::Release);
+
+    auto cachingBB = IGF.Builder.GetInsertBlock();
+    IGF.Builder.CreateBr(contBB);
+    result->addIncoming(fetchedResult, cachingBB);
+    if (resultState)
+      resultState->addIncoming(completedState, cachingBB);
+  }
 
   void addAssociatedConformance(AssociatedConformance requirement) {
       // FIXME: Add static witness tables for type conformances.
@@ -3506,6 +3722,21 @@ FunctionPointer irgen::emitWitnessMethodValue(
   return emitWitnessMethodValue(IGF, wtable, member);
 }
 
+Signature IRGenModule::getAssociatedTypeMetadataAccessFunctionSignature() {
+  auto &fnType = AssociatedTypeMetadataAccessFunctionTy;
+  if (!fnType) {
+    fnType = llvm::FunctionType::get(
+        TypeMetadataResponseTy, {SizeTy, TypeMetadataPtrTy, WitnessTablePtrTy},
+        /*varargs*/ false);
+  }
+
+  auto attrs = llvm::AttributeList::get(getLLVMContext(),
+                                        llvm::AttributeList::FunctionIndex,
+                                        llvm::Attribute::NoUnwind);
+
+  return Signature(fnType, attrs, SwiftCC);
+}
+
 llvm::Value *irgen::computeResilientWitnessTableIndex(
                                             IRGenFunction &IGF,
                                             ProtocolDecl *proto,
@@ -3544,6 +3775,35 @@ irgen::emitAssociatedTypeMetadataRef(IRGenFunction &IGF,
                                      AssociatedType associatedType,
                                      DynamicMetadataRequest request) {
   auto &IGM = IGF.IGM;
+
+  if (IGM.getOptions().EnableAssociatedTypeAccessors) { //
+    auto &pi = IGM.getProtocolInfo(associatedType.getSourceProtocol(),
+                                   ProtocolInfoKind::RequirementSignature);
+    auto index = pi.getAssociatedTypeIndex(IGM, associatedType);
+    llvm::Value *witness = emitInvariantLoadOfOpaqueWitness(
+        IGF, wtable, index.forProtocolWitnessTable());
+
+    auto fnType = llvm::FunctionType::get(
+        IGM.TypeMetadataResponseTy,
+        {IGM.SizeTy, IGM.TypeMetadataPtrTy, IGM.WitnessTablePtrTy},
+        /*varargs*/ false);
+    auto attrs = llvm::AttributeList::get(IGM.getLLVMContext(),
+                                          llvm::AttributeList::FunctionIndex,
+                                          llvm::Attribute::NoUnwind);
+
+    // Cast the witness to the appropriate function type.
+    auto sig = Signature(fnType, attrs, IGM.SwiftCC);
+    auto witnessTy = sig.getType();
+    witness = IGF.Builder.CreateBitCast(witness, witnessTy->getPointerTo());
+
+    FunctionPointer witnessFnPtr(FunctionPointer::KindTy::Function, witness,
+                                 sig);
+
+    // Call the accessor.
+    auto call = IGF.Builder.CreateCall(
+        witnessFnPtr, {request.get(IGF), parentMetadata, wtable});
+    return MetadataResponse::handle(IGF, request, call);
+  }
 
   // Extract the requirements base descriptor.
   auto reqBaseDescriptor =

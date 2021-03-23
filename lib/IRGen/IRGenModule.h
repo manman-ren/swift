@@ -754,6 +754,7 @@ public:
   llvm::CallingConv::ID DefaultCC;     /// default calling convention
   llvm::CallingConv::ID SwiftCC;       /// swift calling convention
 
+  Signature getAssociatedTypeMetadataAccessFunctionSignature();
   Signature getAssociatedTypeWitnessTableAccessFunctionSignature();
 
   /// Get the bit width of an integer type for the target platform.
@@ -868,6 +869,7 @@ private:
   llvm::Type *FixedBufferTy;          /// [N x i8], where N == 3 * sizeof(void*)
 
   llvm::Type *ValueWitnessTys[MaxNumValueWitnesses];
+  llvm::FunctionType *AssociatedTypeMetadataAccessFunctionTy = nullptr;
   llvm::FunctionType *AssociatedTypeWitnessTableAccessFunctionTy = nullptr;
   llvm::StructType *GenericWitnessTableCacheTy = nullptr;
   llvm::StructType *IntegerLiteralTy = nullptr;
@@ -1580,9 +1582,13 @@ public:
   llvm::Function *
   getAddrOfGenericWitnessTableInstantiationFunction(
                                     const NormalProtocolConformance *C);
+  llvm::Function *getAddrOfAssociatedTypeMetadataAccessFunction(
+      const NormalProtocolConformance *C, AssociatedType association);
   llvm::Function *getAddrOfAssociatedTypeWitnessTableAccessFunction(
                                      const NormalProtocolConformance *C,
                                      const AssociatedConformance &association);
+  llvm::Function *getAddrOfDefaultAssociatedTypeMetadataAccessFunction(
+      AssociatedType association);
   llvm::Function *getAddrOfDefaultAssociatedConformanceAccessor(
                                            AssociatedConformance requirement);
 

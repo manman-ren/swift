@@ -327,6 +327,14 @@ std::string LinkEntity::mangleAsString() const {
     return mangler.mangleProtocolWitnessTableLazyCacheVariable(getType(),
                                                     getProtocolConformance());
 
+  case Kind::AssociatedTypeMetadataAccessFunction:
+    return mangler.mangleAssociatedTypeMetadataAccessFunction(
+        getProtocolConformance(), getAssociatedType()->getNameStr());
+
+  case Kind::DefaultAssociatedTypeMetadataAccessFunction:
+    return mangler.mangleDefaultAssociatedTypeMetadataAccessFunction(
+        getAssociatedType());
+
   case Kind::AssociatedTypeWitnessTableAccessFunction: {
     auto assocConf = getAssociatedConformance();
     if (isa<GenericTypeParamType>(assocConf.first)) {
@@ -684,6 +692,8 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     }
   }
 
+  case Kind::AssociatedTypeMetadataAccessFunction:
+  case Kind::DefaultAssociatedTypeMetadataAccessFunction:
   case Kind::AssociatedTypeWitnessTableAccessFunction:
   case Kind::DefaultAssociatedConformanceAccessor:
   case Kind::GenericProtocolWitnessTableInstantiationFunction:
@@ -791,6 +801,8 @@ bool LinkEntity::isContextDescriptor() const {
   case Kind::ProtocolWitnessTable:
   case Kind::ProtocolWitnessTablePattern:
   case Kind::GenericProtocolWitnessTableInstantiationFunction:
+  case Kind::AssociatedTypeMetadataAccessFunction:
+  case Kind::DefaultAssociatedTypeMetadataAccessFunction:
   case Kind::AssociatedTypeWitnessTableAccessFunction:
   case Kind::ReflectionAssociatedTypeDescriptor:
   case Kind::ProtocolConformanceDescriptor:
@@ -1094,6 +1106,8 @@ bool LinkEntity::isWeakImported(ModuleDecl *module) const {
   case Kind::AnonymousDescriptor:
   case Kind::ProtocolWitnessTablePattern:
   case Kind::GenericProtocolWitnessTableInstantiationFunction:
+  case Kind::AssociatedTypeMetadataAccessFunction:
+  case Kind::DefaultAssociatedTypeMetadataAccessFunction:
   case Kind::AssociatedTypeWitnessTableAccessFunction:
   case Kind::ReflectionAssociatedTypeDescriptor:
   case Kind::ProtocolWitnessTableLazyAccessFunction:
@@ -1151,6 +1165,7 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   case Kind::AssociatedTypeDescriptor:
   case Kind::AssociatedConformanceDescriptor:
   case Kind::DefaultAssociatedConformanceAccessor:
+  case Kind::DefaultAssociatedTypeMetadataAccessFunction:
   case Kind::BaseConformanceDescriptor:
   case Kind::DynamicallyReplaceableFunctionVariableAST:
   case Kind::DynamicallyReplaceableFunctionKeyAST:
@@ -1183,6 +1198,7 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
 
   case Kind::ProtocolWitnessTablePattern:
   case Kind::GenericProtocolWitnessTableInstantiationFunction:
+  case Kind::AssociatedTypeMetadataAccessFunction:
   case Kind::AssociatedTypeWitnessTableAccessFunction:
   case Kind::ReflectionAssociatedTypeDescriptor:
   case Kind::ProtocolWitnessTableLazyCacheVariable:
