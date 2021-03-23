@@ -1641,6 +1641,28 @@ static bool ParseIRGenArgs(IRGenOptions &Opts, ArgList &Args,
     Opts.EnableReflectionNames = false;
   }
 
+  if (Args.hasArg(OPT_emit_dead_strippable_symbols)) {
+    if (!Opts.UseJIT) {
+      Opts.EmitDeadStrippableSymbols = true;
+    }
+  }
+
+  if (Args.hasArg(OPT_vtable_method_elimination)) {
+    if (!Opts.UseJIT) {
+      Opts.VTableMethodElimination = true;
+    }
+  }
+
+  if (Args.hasArg(OPT_wtable_method_elimination)) {
+    if (!Opts.UseJIT) {
+      Opts.WTableMethodElimination = true;
+    }
+  }
+
+  if (Args.hasArg(OPT_enable_associated_type_accessors)) {
+    Opts.EnableAssociatedTypeAccessors = true;
+  }
+
   if (Args.hasArg(OPT_force_public_linkage)) {
     Opts.ForcePublicLinkage = true;
   }
