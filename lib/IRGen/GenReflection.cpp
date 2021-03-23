@@ -1227,7 +1227,9 @@ static std::string getReflectionSectionName(IRGenModule &IGM,
   case llvm::Triple::MachO:
     assert(LongName.size() <= 7 &&
            "Mach-O section name length must be <= 16 characters");
-    OS << "__TEXT,__swift5_" << LongName << ", regular, no_dead_strip";
+    OS << "__TEXT,__swift5_" << LongName << ", regular";
+    if (!IGM.IRGen.Opts.EmitDeadStrippableSymbols)
+      OS << ", no_dead_strip";
     break;
   }
   return std::string(OS.str());
