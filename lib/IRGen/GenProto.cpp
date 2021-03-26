@@ -2131,6 +2131,41 @@ static bool isConstantWitnessTable(SILWitnessTable *wt) {
   return true;
 }
 
+void emitCheckedLoadStub(IRGenModule &IGM, StringRef mangledName) {
+  auto generateThunkFn = [&IGM, mangledName](IRGenFunction &subIGF) {
+    // subIGF.CurFn->setDoesNotAccessMemory();
+    // subIGF.CurFn->setCallingConv(IGM.DefaultCC);
+    ApplyIRLinkage(IRLinkage::ExternalExport).to(subIGF.CurFn);
+    // subIGF.CurFn->setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+    // IGM.setHasNoFramePointer(subIGF.CurFn);
+
+    auto params = subIGF.collectParameters();
+    auto arg0 = params.claimNext();
+
+    auto typeId = llvm::MetadataAsValue::get(
+        *IGM.LLVMContext, llvm::MDString::get(*IGM.LLVMContext, mangledName));
+
+    llvm::Function *checkedLoadIntrinsic = llvm::Intrinsic::getDeclaration(
+        &IGM.Module, llvm::Intrinsic::type_checked_load);
+    SmallVector<llvm::Value *, 8> args;
+    args.push_back(arg0);
+    args.push_back(llvm::ConstantInt::get(IGM.Int32Ty, 0));
+    args.push_back(typeId);
+    llvm::Value *fnPtr = subIGF.Builder.CreateCall(checkedLoadIntrinsic, args);
+    fnPtr = subIGF.Builder.CreateExtractValue(fnPtr, 0);
+    subIGF.Builder.CreateRet(fnPtr);
+
+#ifndef NDEBUG
+    subIGF.CurFn->dump();
+#endif
+  };
+
+  auto fnName = "__checked_load_" + std::string(mangledName);
+  printf("%s\n", fnName.c_str());
+  IGM.getOrCreateHelperFunction(fnName, IGM.Int8PtrTy, {IGM.Int8PtrTy},
+                                generateThunkFn, /*noinline*/ false);
+}
+
 void IRGenModule::emitSILWitnessTable(SILWitnessTable *wt) {
   // Don't emit a witness table if it is a declaration.
   if (wt->isDeclaration())

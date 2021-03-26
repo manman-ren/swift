@@ -329,6 +329,8 @@ void IRGenModule::emitNonoverriddenMethodDescriptor(const SILVTable *VTable,
   getAddrOfLLVMVariable(entity, init, DebugTypeInfo());
 }
 
+void emitCheckedLoadStub(IRGenModule &IGM, StringRef mangledName);
+
 namespace {
   template<class Impl>
   class ContextDescriptorBuilderBase {
@@ -1223,7 +1225,14 @@ namespace {
       auto addr = IGM.getAddrOfTypeContextDescriptor(Type, HasMetadata,
                                                      B.finishAndCreateFuture());
       auto var = cast<llvm::GlobalVariable>(addr);
-      
+      if (IGM.getOptions().VTableMethodElimination) {
+        asImpl().addTypeMetadata(var);
+        var->setVCallVisibilityMetadata(
+            llvm::GlobalObject::VCallVisibility::VCallVisibilityLinkageUnit);
+        var->setConstant(true);
+        // IGM.setTrueConstGlobal(var);
+        return var;
+      }
       var->setConstant(true);
       IGM.setTrueConstGlobal(var);
       return var;
@@ -1431,6 +1440,8 @@ namespace {
       B.addRelativeAddress(IGM.getAddrOfReflectionFieldDescriptor(
         getType()->getDeclaredType()->getCanonicalType()));
     }
+
+    void addTypeMetadata(llvm::GlobalVariable *var) {}
   };
   
   class EnumContextDescriptorBuilder
@@ -1513,6 +1524,8 @@ namespace {
       B.addRelativeAddress(IGM.getAddrOfReflectionFieldDescriptor(
         getType()->getDeclaredType()->getCanonicalType()));
     }
+
+    void addTypeMetadata(llvm::GlobalVariable *var) {}
   };
   
   class ClassContextDescriptorBuilder
@@ -1680,17 +1693,27 @@ namespace {
         emitMethodDescriptor(fn);
     }
 
-    void emitMethodDescriptor(SILDeclRef fn) {
+  SmallVector<std::pair<Size, SILDeclRef>, 8> VTableEntriesForTypeMetadata;
+
+  void emitMethodDescriptor(SILDeclRef fn) {
 
       // Define the method descriptor to point to the current position in the
       // nominal type descriptor, if it has a well-defined symbol name.
       IGM.defineMethodDescriptor(fn, Type,
                       B.getAddrOfCurrentPosition(IGM.MethodDescriptorStructTy));
 
-      // Actually build the descriptor.
+    if (IGM.getOptions().VTableMethodElimination) {
+      auto offset = B.getNextOffsetFromGlobal();
+      VTableEntriesForTypeMetadata.push_back(
+          std::pair<Size, SILDeclRef>(offset + Size(4), fn));
+    }
+
+    // Actually build the descriptor.
       auto descriptor = B.beginStruct(IGM.MethodDescriptorStructTy);
       buildMethodDescriptorFields(IGM, VTable, fn, descriptor);
-      descriptor.finishAndAddTo(B);
+    // descriptor.addInt(IGM.Int32Ty, 0);
+    // descriptor.addRelativeAddressOrNull(nullptr);
+    descriptor.finishAndAddTo(B);
 
       // Emit method dispatch thunk if the class is resilient.
       auto *func = cast<AbstractFunctionDecl>(fn.getDecl());
@@ -1699,8 +1722,25 @@ namespace {
         IGM.emitDispatchThunk(fn);
       }
     }
-    
-    void emitNonoverriddenMethod(SILDeclRef fn) {
+
+  void addTypeMetadata(llvm::GlobalVariable *var) {
+    if (!IGM.getOptions().VTableMethodElimination)
+      return;
+
+    for (auto ventry : VTableEntriesForTypeMetadata) {
+      auto entity = LinkEntity::forMethodDescriptor(ventry.second);
+      auto offset = ventry.first.getValue();
+      auto mangled = entity.mangleAsString();
+      var->addTypeMetadata(offset,
+                           llvm::MDString::get(*IGM.LLVMContext, mangled));
+      printf("addTypeMetadata, offset = %d, mangled = %s\n", offset,
+             mangled.c_str());
+
+      emitCheckedLoadStub(IGM, mangled);
+    }
+  }
+
+  void emitNonoverriddenMethod(SILDeclRef fn) {
       // TODO: Derivative functions do not distinguish themselves in the mangled
       // names of method descriptor symbols yet, causing symbol name collisions.
       if (fn.getDerivativeFunctionIdentifier())
@@ -1720,6 +1760,16 @@ namespace {
       // exist in the table in the class's context descriptor since it isn't
       // in the vtable, but external clients need to be able to link against the
       // symbol.
+      if (IGM.getOptions().VTableMethodElimination) {
+        auto offset = B.getNextOffsetFromGlobal();
+        if (offset.getValue() != 0) {
+          printf("emitNonoverriddenMethod, offset = %d, fn = %s\n",
+              offset.getValue(),
+              LinkEntity::forMethodDescriptor(fn).mangleAsString().c_str());
+          VTableEntriesForTypeMetadata.push_back(
+              std::pair<Size, SILDeclRef>(offset + Size(4), fn));
+        }
+      }
       IGM.emitNonoverriddenMethodDescriptor(VTable, fn);
     }
 
@@ -1745,7 +1795,13 @@ namespace {
     }
 
     void emitMethodOverrideDescriptor(SILDeclRef baseRef, SILDeclRef declRef) {
-      auto descriptor = B.beginStruct(IGM.MethodOverrideDescriptorStructTy);
+    if (IGM.getOptions().VTableMethodElimination) {
+      auto offset = B.getNextOffsetFromGlobal();
+      VTableEntriesForTypeMetadata.push_back(
+          std::pair<Size, SILDeclRef>(offset + Size(8), declRef));
+    }
+
+    auto descriptor = B.beginStruct(IGM.MethodOverrideDescriptorStructTy);
 
       // The class containing the base method.
       auto *baseClass = cast<ClassDecl>(baseRef.getDecl()->getDeclContext());
@@ -1754,12 +1810,14 @@ namespace {
       auto baseClassDescriptor =
         IGM.getAddrOfLLVMVariableOrGOTEquivalent(baseClassEntity);
       descriptor.addRelativeAddress(baseClassDescriptor);
+      // descriptor.addRelativeAddressOrNull(nullptr);
 
       // The base method.
       auto baseMethodEntity = LinkEntity::forMethodDescriptor(baseRef);
       auto baseMethodDescriptor =
         IGM.getAddrOfLLVMVariableOrGOTEquivalent(baseMethodEntity);
       descriptor.addRelativeAddress(baseMethodDescriptor);
+      // descriptor.addRelativeAddressOrNull(nullptr);
 
       // The implementation of the override.
       if (auto entry = VTable->getEntry(IGM.getSILModule(), baseRef)) {
@@ -1773,6 +1831,7 @@ namespace {
           implFn = IGM.getAddrOfSILFunction(impl, NotForDefinition);
 
         descriptor.addRelativeAddress(implFn);
+        // descriptor.addRelativeAddressOrNull(nullptr);
       } else {
         // The method is removed by dead method elimination.
         // It should be never called. We add a pointer to an error function.
@@ -3155,7 +3214,9 @@ namespace {
       B.addInt(IGM.SizeTy, getDefaultActorStorageFieldOffset(IGM).getValue());
     }
 
-    void addReifiedVTableEntry(SILDeclRef fn) {
+  SmallVector<std::pair<Size, SILDeclRef>, 8> VTableEntries;
+
+  void addReifiedVTableEntry(SILDeclRef fn) {
       // Find the vtable entry.
       assert(VTable && "no vtable?!");
       auto entry = VTable->getEntry(IGM.getSILModule(), fn);
@@ -3176,11 +3237,33 @@ namespace {
                                              IGM.FunctionPtrTy);
       }
 
-      auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods;
+      if (IGM.getOptions().VTableMethodElimination) {
+        auto offset = B.getNextOffsetFromGlobal();
+        // llvm::errs() << "addReifiedVTableEntry, " << fn << ", ";
+        // llvm::errs() << "offset: " << offset.getValue() << "\n";
+
+        VTableEntries.push_back(std::pair<Size, SILDeclRef>(offset, fn));
+      }
+
+    auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods;
       B.addSignedPointer(ptr, schema, fn);
     }
 
-    void addPlaceholder(MissingMemberDecl *m) {
+  void addTypeMetadata(llvm::GlobalVariable *var) {
+    if (!IGM.getOptions().VTableMethodElimination)
+      return;
+    assert(VTable && "no vtable?!");
+
+    for (auto ventry : VTableEntries) {
+      auto entity = LinkEntity::forMethodDescriptor(ventry.second);
+      auto offset = ventry.first.getValue();
+      auto mangled = entity.mangleAsString();
+      var->addTypeMetadata(offset,
+                           llvm::MDString::get(*IGM.LLVMContext, mangled));
+    }
+  }
+
+  void addPlaceholder(MissingMemberDecl *m) {
       assert(m->getNumberOfVTableEntries() == 0
              && "cannot generate metadata with placeholders in it");
     }
@@ -3778,6 +3861,15 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
   bool canBeConstant;
 
   auto strategy = IGM.getClassMetadataStrategy(classDecl);
+  bool isPattern = (strategy == ClassMetadataStrategy::Resilient);
+  llvm::GlobalValue *var;
+
+  CanType declaredType = classDecl->getDeclaredType()->getCanonicalType();
+
+  StringRef section{};
+  if (classDecl->isObjC() &&
+      IGM.TargetInfo.OutputObjectFormat == llvm::Triple::MachO)
+    section = "__DATA,__objc_data, regular";
 
   switch (strategy) {
   case ClassMetadataStrategy::Resilient: {
@@ -3788,6 +3880,8 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
       canBeConstant = true;
 
       builder.createMetadataAccessFunction();
+      var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
+                                   init.finishAndCreateFuture(), section);
       break;
     }
 
@@ -3797,6 +3891,8 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
     canBeConstant = true;
 
     builder.createMetadataAccessFunction();
+    var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
+                                 init.finishAndCreateFuture(), section);
     break;
   }
 
@@ -3808,6 +3904,8 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
     canBeConstant = builder.canBeConstant();
 
     builder.createMetadataAccessFunction();
+    var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
+                                 init.finishAndCreateFuture(), section);
     break;
   }
 
@@ -3819,20 +3917,19 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
     canBeConstant = builder.canBeConstant();
 
     builder.createMetadataAccessFunction();
+    std::function<void(llvm::GlobalVariable *)> fn = [&](llvm::GlobalVariable
+                                                             *var) {
+      if (IGM.getOptions().VTableMethodElimination) {
+        builder.addTypeMetadata(llvm::cast<llvm::GlobalVariable>(var));
+        var->setVCallVisibilityMetadata(
+            llvm::GlobalObject::VCallVisibility::VCallVisibilityLinkageUnit);
+      }
+    };
+    var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
+                                 init.finishAndCreateFuture(), section, fn);
     break;
   }
   }
-
-  CanType declaredType = classDecl->getDeclaredType()->getCanonicalType();
-
-  StringRef section{};
-  if (classDecl->isObjC() &&
-      IGM.TargetInfo.OutputObjectFormat == llvm::Triple::MachO)
-    section = "__DATA,__objc_data, regular";
-
-  bool isPattern = (strategy == ClassMetadataStrategy::Resilient);
-  auto var = IGM.defineTypeMetadata(declaredType, isPattern, canBeConstant,
-                                    init.finishAndCreateFuture(), section);
 
   // If the class does not require dynamic initialization, or if it only
   // requires dynamic initialization on a newer Objective-C runtime, add it

@@ -4258,8 +4258,8 @@ llvm::GlobalValue *IRGenModule::defineAlias(LinkEntity entity,
 llvm::GlobalValue *IRGenModule::defineTypeMetadata(CanType concreteType,
                                                    bool isPattern,
                                                    bool isConstant,
-                                                   ConstantInitFuture init,
-                                                   llvm::StringRef section) {
+                                                   ConstantInitFuture init, llvm::StringRef section,
+    std::function<void(llvm::GlobalVariable *)> fn) {
   assert(init);
 
   auto isPrespecialized = concreteType->getAnyGeneric() &&
@@ -4293,6 +4293,9 @@ llvm::GlobalValue *IRGenModule::defineTypeMetadata(CanType concreteType,
   var->setConstant(isConstant);
   if (!section.empty())
     var->setSection(section);
+
+  if (fn)
+    fn(var);
 
   LinkInfo link = LinkInfo::get(*this, entity, ForDefinition);
   if (link.isUsed())

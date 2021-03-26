@@ -1318,6 +1318,7 @@ static bool ParseTBDGenArgs(TBDGenOptions &Opts, ArgList &Args,
   using namespace options;
 
   Opts.HasMultipleIGMs = Invocation.getIRGenOptions().hasMultipleIGMs();
+  Opts.VTableMethodElim = Invocation.getIRGenOptions().VTableMethodElimination;
 
   if (const Arg *A = Args.getLastArg(OPT_module_link_name)) {
     Opts.ModuleLinkName = A->getValue();

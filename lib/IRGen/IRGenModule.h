@@ -1439,8 +1439,8 @@ public:
   llvm::GlobalValue *defineTypeMetadata(CanType concreteType,
                                         bool isPattern,
                                         bool isConstant,
-                                        ConstantInitFuture init,
-                                        llvm::StringRef section = {});
+                                        ConstantInitFuture init, llvm::StringRef section = {},
+                     std::function<void(llvm::GlobalVariable *)> fn = nullptr);
 
   TypeEntityReference getTypeEntityReference(GenericTypeDecl *D);
 
