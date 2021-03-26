@@ -3483,6 +3483,25 @@ llvm::Constant *IRGenModule::emitSwiftProtocols() {
   if (SwiftProtocols.empty())
     return nullptr;
 
+  StringRef sectionName;
+  switch (TargetInfo.OutputObjectFormat) {
+  case llvm::Triple::GOFF:
+  case llvm::Triple::UnknownObjectFormat:
+    llvm_unreachable("Don't know how to emit protocols for "
+                     "the selected object format.");
+  case llvm::Triple::MachO:
+    sectionName = "__TEXT, __swift5_protos, regular, no_dead_strip";
+    break;
+  case llvm::Triple::ELF:
+  case llvm::Triple::Wasm:
+    sectionName = "swift5_protocols";
+    break;
+  case llvm::Triple::XCOFF:
+  case llvm::Triple::COFF:
+    sectionName = ".sw5prt$B";
+    break;
+  }
+
   // Define the global variable for the protocol list.
   ConstantInitBuilder builder(*this);
   auto recordsArray = builder.beginArray(ProtocolRecordTy);
@@ -3507,25 +3526,6 @@ llvm::Constant *IRGenModule::emitSwiftProtocols() {
                                             /*isConstant*/ true,
                                             llvm::GlobalValue::PrivateLinkage);
 
-  StringRef sectionName;
-  switch (TargetInfo.OutputObjectFormat) {
-  case llvm::Triple::GOFF:
-  case llvm::Triple::UnknownObjectFormat:
-    llvm_unreachable("Don't know how to emit protocols for "
-                     "the selected object format.");
-  case llvm::Triple::MachO:
-    sectionName = "__TEXT, __swift5_protos, regular, no_dead_strip";
-    break;
-  case llvm::Triple::ELF:
-  case llvm::Triple::Wasm:
-    sectionName = "swift5_protocols";
-    break;
-  case llvm::Triple::XCOFF:
-  case llvm::Triple::COFF:
-    sectionName = ".sw5prt$B";
-    break;
-  }
-
   var->setSection(sectionName);
   
   disableAddressSanitizer(*this, var);
@@ -3547,6 +3547,25 @@ llvm::Constant *IRGenModule::emitProtocolConformances() {
   if (ProtocolConformances.empty())
     return nullptr;
 
+  StringRef sectionName;
+  switch (TargetInfo.OutputObjectFormat) {
+  case llvm::Triple::GOFF:
+  case llvm::Triple::UnknownObjectFormat:
+    llvm_unreachable("Don't know how to emit protocol conformances for "
+                     "the selected object format.");
+  case llvm::Triple::MachO:
+    sectionName = "__TEXT, __swift5_proto, regular, no_dead_strip";
+    break;
+  case llvm::Triple::ELF:
+  case llvm::Triple::Wasm:
+    sectionName = "swift5_protocol_conformances";
+    break;
+  case llvm::Triple::XCOFF:
+  case llvm::Triple::COFF:
+    sectionName = ".sw5prtc$B";
+    break;
+  }
+
   // Define the global variable for the conformance list.
   ConstantInitBuilder builder(*this);
   auto descriptorArray = builder.beginArray(RelativeAddressTy);
@@ -3567,25 +3586,6 @@ llvm::Constant *IRGenModule::emitProtocolConformances() {
                                           Alignment(4),
                                           /*isConstant*/ true,
                                           llvm::GlobalValue::PrivateLinkage);
-
-  StringRef sectionName;
-  switch (TargetInfo.OutputObjectFormat) {
-  case llvm::Triple::GOFF:
-  case llvm::Triple::UnknownObjectFormat:
-    llvm_unreachable("Don't know how to emit protocol conformances for "
-                     "the selected object format.");
-  case llvm::Triple::MachO:
-    sectionName = "__TEXT, __swift5_proto, regular, no_dead_strip";
-    break;
-  case llvm::Triple::ELF:
-  case llvm::Triple::Wasm:
-    sectionName = "swift5_protocol_conformances";
-    break;
-  case llvm::Triple::XCOFF:
-  case llvm::Triple::COFF:
-    sectionName = ".sw5prtc$B";
-    break;
-  }
 
   var->setSection(sectionName);
 
@@ -3621,6 +3621,24 @@ llvm::Constant *IRGenModule::emitTypeMetadataRecords() {
   if (RuntimeResolvableTypes.empty())
     return nullptr;
 
+	
+  auto generateRecord = [this](TypeEntityReference ref,
+                               llvm::GlobalVariable *var,
+                               ArrayRef<unsigned> baseIndices) {
+    // Form the relative address, with the type reference kind in the low bits.
+    llvm::Constant *relativeAddr =
+        emitDirectRelativeReference(ref.getValue(), var, baseIndices);
+    unsigned lowBits = static_cast<unsigned>(ref.getKind());
+    if (lowBits != 0) {
+      relativeAddr = llvm::ConstantExpr::getAdd(
+          relativeAddr, llvm::ConstantInt::get(RelativeAddressTy, lowBits));
+    }
+
+    llvm::Constant *recordFields[] = {relativeAddr};
+    auto record = llvm::ConstantStruct::get(TypeMetadataRecordTy, recordFields);
+    return record;
+  };
+
   // Define the global variable for the conformance list.
   // We have to do this before defining the initializer since the entries will
   // contain offsets relative to themselves.
@@ -3638,20 +3656,8 @@ llvm::Constant *IRGenModule::emitTypeMetadataRecords() {
   SmallVector<llvm::Constant *, 8> elts;
   for (auto type : RuntimeResolvableTypes) {
     auto ref = getTypeEntityReference(type);
-
-    // Form the relative address, with the type reference kind in the low bits.
     unsigned arrayIdx = elts.size();
-    llvm::Constant *relativeAddr =
-      emitDirectRelativeReference(ref.getValue(), var, { arrayIdx, 0 });
-    unsigned lowBits = static_cast<unsigned>(ref.getKind());
-    if (lowBits != 0) {
-      relativeAddr = llvm::ConstantExpr::getAdd(relativeAddr,
-                       llvm::ConstantInt::get(RelativeAddressTy, lowBits));
-    }
-
-    llvm::Constant *recordFields[] = { relativeAddr };
-    auto record = llvm::ConstantStruct::get(TypeMetadataRecordTy,
-                                            recordFields);
+    auto record = generateRecord(ref, var, {arrayIdx, 0});
     elts.push_back(record);
   }
 
