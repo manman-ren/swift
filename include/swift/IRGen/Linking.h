@@ -384,7 +384,8 @@ class LinkEntity {
     /// ProtocolConformance*.
     ProtocolWitnessTableLazyCacheVariable,
 
-    /// A SIL differentiability witness.
+    /// A SIL differentiability witness. The pointer is a
+    /// SILDifferentiabilityWitness*.
     DifferentiabilityWitness,
 
     // Everything following this is a type kind.
@@ -450,6 +451,15 @@ class LinkEntity {
     /// context.
     /// The pointer is a SILFunction*.
     AsyncFunctionPointer,
+
+    /// The thunk provided for partially applying a function at some values
+    /// which are captured.
+    /// The pointer is an llvm::Function*.
+    PartialApplyForwarder,
+
+    /// An async function pointer to a partial apply forwarder.
+    /// The pointer is the llvm::Function* for a partial apply forwarder.
+    PartialApplyForwarderAsyncFunctionPointer,
   };
   friend struct llvm::DenseMapInfo<LinkEntity>;
 
@@ -568,8 +578,7 @@ class LinkEntity {
     for (const auto &reqt : proto->getRequirementSignature()) {
       if (reqt.getKind() == RequirementKind::Conformance &&
           reqt.getFirstType()->getCanonicalType() == associatedType &&
-          reqt.getSecondType()->castTo<ProtocolType>()->getDecl() ==
-                                                                requirement) {
+          reqt.getProtocolDecl() == requirement) {
         return index;
       }
       ++index;
@@ -593,7 +602,7 @@ class LinkEntity {
     auto &reqt = proto->getRequirementSignature()[index];
     assert(reqt.getKind() == RequirementKind::Conformance);
     return { reqt.getFirstType()->getCanonicalType(),
-             reqt.getSecondType()->castTo<ProtocolType>()->getDecl() };
+             reqt.getProtocolDecl() };
   }
 
   static std::pair<CanType, ProtocolDecl*>
@@ -1192,6 +1201,10 @@ public:
       entity.Data = LINKENTITY_SET_FIELD(
           Kind, unsigned(LinkEntity::Kind::DispatchThunkAllocatorAsyncFunctionPointer));
       break;
+    case LinkEntity::Kind::PartialApplyForwarder:
+      entity.Data = LINKENTITY_SET_FIELD(
+          Kind, unsigned(LinkEntity::Kind::PartialApplyForwarderAsyncFunctionPointer));
+      break;
 
     default:
       llvm_unreachable("Link entity kind cannot have an async function pointer");
@@ -1232,10 +1245,24 @@ public:
           Kind, unsigned(LinkEntity::Kind::DispatchThunkAllocator));
       break;
 
+    case LinkEntity::Kind::PartialApplyForwarderAsyncFunctionPointer:
+      entity.Data = LINKENTITY_SET_FIELD(
+          Kind, unsigned(LinkEntity::Kind::PartialApplyForwarder));
+      break;
+
     default:
       llvm_unreachable("Link entity is not an async function pointer");
     }
 
+    return entity;
+  }
+
+  static LinkEntity forPartialApplyForwarder(llvm::Function *function) {
+    LinkEntity entity;
+    entity.Pointer = function;
+    entity.SecondaryPointer = nullptr;
+    entity.Data =
+        LINKENTITY_SET_FIELD(Kind, unsigned(Kind::PartialApplyForwarder));
     return entity;
   }
 

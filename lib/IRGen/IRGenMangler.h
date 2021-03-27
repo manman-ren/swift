@@ -56,13 +56,12 @@ public:
       const AbstractFunctionDecl *func,
       AutoDiffDerivativeFunctionIdentifier *derivativeId) {
     beginManglingWithAutoDiffOriginalFunction(func);
-    auto kindCode =
-        (char)Demangle::getAutoDiffFunctionKind(derivativeId->getKind());
+    auto kind = Demangle::getAutoDiffFunctionKind(derivativeId->getKind());
     AutoDiffConfig config(
         derivativeId->getParameterIndices(),
         IndexSubset::get(func->getASTContext(), 1, {0}),
         derivativeId->getDerivativeGenericSignature());
-    appendAutoDiffFunctionParts(kindCode, config);
+    appendAutoDiffFunctionParts("TJ", kind, config);
     appendOperator("Tj");
     return finalize();
   }
@@ -86,13 +85,12 @@ public:
       const AbstractFunctionDecl *func,
       AutoDiffDerivativeFunctionIdentifier *derivativeId) {
     beginManglingWithAutoDiffOriginalFunction(func);
-    auto kindCode =
-        (char)Demangle::getAutoDiffFunctionKind(derivativeId->getKind());
+    auto kind = Demangle::getAutoDiffFunctionKind(derivativeId->getKind());
     AutoDiffConfig config(
         derivativeId->getParameterIndices(),
         IndexSubset::get(func->getASTContext(), 1, {0}),
         derivativeId->getDerivativeGenericSignature());
-    appendAutoDiffFunctionParts(kindCode, config);
+    appendAutoDiffFunctionParts("TJ", kind, config);
     appendOperator("Tq");
     return finalize();
   }
@@ -509,6 +507,7 @@ public:
   std::string mangleOutlinedCopyFunction(CanType ty,
                                          CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(ty);
     if (sig)
       appendGenericSignature(sig);
@@ -518,6 +517,7 @@ public:
   std::string mangleOutlinedConsumeFunction(CanType ty,
                                             CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(ty);
     if (sig)
       appendGenericSignature(sig);
@@ -528,6 +528,7 @@ public:
   std::string mangleOutlinedRetainFunction(CanType t,
                                            CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -537,6 +538,7 @@ public:
   std::string mangleOutlinedReleaseFunction(CanType t,
                                             CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -547,6 +549,7 @@ public:
   std::string mangleOutlinedInitializeWithTakeFunction(CanType t,
                                                        CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -556,6 +559,7 @@ public:
   std::string mangleOutlinedInitializeWithCopyFunction(CanType t,
                                                        CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -565,6 +569,7 @@ public:
   std::string mangleOutlinedAssignWithTakeFunction(CanType t,
                                                    CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -574,6 +579,7 @@ public:
   std::string mangleOutlinedAssignWithCopyFunction(CanType t,
                                                    CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -583,6 +589,7 @@ public:
   std::string mangleOutlinedDestroyFunction(CanType t,
                                             CanGenericSignature sig) {
     beginMangling();
+    bindGenericParameters(sig);
     appendType(t);
     if (sig)
       appendGenericSignature(sig);
@@ -591,17 +598,16 @@ public:
   }
 
   std::string manglePartialApplyForwarder(StringRef FuncName);
-  
+  std::string mangleAsyncNonconstantPartialApplyThunk(StringRef FuncName,
+                                                      unsigned index);
+
   std::string mangleTypeForForeignMetadataUniquing(Type type) {
     return mangleTypeWithoutPrefix(type);
   }
 
   SymbolicMangling mangleTypeForReflection(IRGenModule &IGM,
-                                           Type Ty);
-  
-  SymbolicMangling mangleProtocolConformanceForReflection(IRGenModule &IGM,
-                                            Type Ty,
-                                            ProtocolConformanceRef conformance);
+                                           CanGenericSignature genericSig,
+                                           CanType Ty);
 
   std::string mangleTypeForLLVMTypeName(CanType Ty);
 

@@ -447,14 +447,16 @@ std::string LinkEntity::mangleAsString() const {
     return mangler.mangleReflectionAssociatedTypeDescriptor(
                                                     getProtocolConformance());
   case Kind::DifferentiabilityWitness:
-    return mangler.mangleSILDifferentiabilityWitnessKey(
-        {getSILDifferentiabilityWitness()->getOriginalFunction()->getName(),
-         getSILDifferentiabilityWitness()->getConfig()});
+    return mangler.mangleSILDifferentiabilityWitness(
+        getSILDifferentiabilityWitness()->getOriginalFunction()->getName(),
+        getSILDifferentiabilityWitness()->getKind(),
+        getSILDifferentiabilityWitness()->getConfig());
 
   case Kind::AsyncFunctionPointer:
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
-  case Kind::DispatchThunkAllocatorAsyncFunctionPointer: {
+  case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer: {
     std::string Result(getUnderlyingEntityForAsyncFunctionPointer()
         .mangleAsString());
     Result.append("Tu");
@@ -467,6 +469,10 @@ std::string LinkEntity::mangleAsString() const {
     Result.append("Tu");
     return Result;
   }
+  case Kind::PartialApplyForwarder:
+    std::string Result;
+    Result = std::string(static_cast<llvm::Function *>(Pointer)->getName());
+    return Result;
   }
   llvm_unreachable("bad entity kind!");
 }
@@ -747,8 +753,11 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
     return getUnderlyingEntityForAsyncFunctionPointer()
         .getLinkage(ForDefinition);
+  case Kind::PartialApplyForwarder:
+    return SILLinkage::Private;
   }
   llvm_unreachable("bad link entity kind");
 }
@@ -772,6 +781,7 @@ bool LinkEntity::isContextDescriptor() const {
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
   case Kind::MethodDescriptor:
   case Kind::MethodDescriptorDerivative:
   case Kind::MethodDescriptorInitializer:
@@ -832,6 +842,7 @@ bool LinkEntity::isContextDescriptor() const {
   case Kind::NoncanonicalSpecializedGenericTypeMetadata:
   case Kind::NoncanonicalSpecializedGenericTypeMetadataCacheVariable:
   case Kind::CanonicalPrespecializedGenericTypeCachingOnceToken:
+  case Kind::PartialApplyForwarder:
     return false;
   }
   llvm_unreachable("invalid descriptor");
@@ -946,8 +957,11 @@ llvm::Type *LinkEntity::getDefaultDeclarationType(IRGenModule &IGM) const {
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
   case Kind::AsyncFunctionPointerAST:
     return IGM.AsyncFunctionPointerTy;
+  case Kind::PartialApplyForwarder:
+    return IGM.FunctionPtrTy;
   default:
     llvm_unreachable("declaration LLVM type not specified");
   }
@@ -979,6 +993,7 @@ Alignment LinkEntity::getAlignment(IRGenModule &IGM) const {
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
   case Kind::ObjCClassRef:
   case Kind::ObjCClass:
   case Kind::TypeMetadataLazyCacheVariable:
@@ -1003,6 +1018,7 @@ Alignment LinkEntity::getAlignment(IRGenModule &IGM) const {
   case Kind::DifferentiabilityWitness:
   case Kind::NoncanonicalSpecializedGenericTypeMetadata:
   case Kind::NoncanonicalSpecializedGenericTypeMetadataCacheVariable:
+  case Kind::PartialApplyForwarder:
     return IGM.getPointerAlignment();
   case Kind::CanonicalPrespecializedGenericTypeCachingOnceToken:
   case Kind::TypeMetadataDemanglingCacheVariable:
@@ -1097,6 +1113,7 @@ bool LinkEntity::isWeakImported(ModuleDecl *module) const {
   // TODO: Revisit some of the below, for weak conformances.
   case Kind::ObjCMetadataUpdateFunction:
   case Kind::ObjCResilientClassStub:
+  case Kind::PartialApplyForwarder:
   case Kind::TypeMetadataPattern:
   case Kind::TypeMetadataInstantiationCache:
   case Kind::TypeMetadataInstantiationFunction:
@@ -1126,6 +1143,7 @@ bool LinkEntity::isWeakImported(ModuleDecl *module) const {
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
     return getUnderlyingEntityForAsyncFunctionPointer()
         .isWeakImported(module);
   }
@@ -1236,12 +1254,14 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   case Kind::ValueWitness:
   case Kind::ValueWitnessTable:
   case Kind::DifferentiabilityWitness:
+  case Kind::PartialApplyForwarder:
     return nullptr;
 
   case Kind::AsyncFunctionPointer:
   case Kind::DispatchThunkAsyncFunctionPointer:
   case Kind::DispatchThunkInitializerAsyncFunctionPointer:
   case Kind::DispatchThunkAllocatorAsyncFunctionPointer:
+  case Kind::PartialApplyForwarderAsyncFunctionPointer:
     return getUnderlyingEntityForAsyncFunctionPointer()
         .getDeclContextForEmission();
   }
