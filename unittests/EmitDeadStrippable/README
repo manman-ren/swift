@@ -1,0 +1,16 @@
+## libLTO.dylib
+## private patch:  fix lto_library path to the one relative to swift executable
+## Assume libLTO.dylib is under xxx/lib/libLTO.dylib while swift binary is under xxx/bin/swift
+cp $SWIFT_SOURCE_ROOT/build/Ninja-RelWithDebInfoAssert//llvm-macosx-x86_64/lib/libLTO.dylib $SWIFT_SOURCE_ROOT/build/Ninja-RelWithDebInfoAssert//swift-macosx-x86_64/lib/
+
+export TOOLCHAIN_PATH=$SWIFT_SOURCE_ROOT/build/Ninja-RelWithDebInfoAssert/swift-macosx-x86_64/
+export LIBRARY_PATH=$SWIFT_SOURCE_ROOT/build/Ninja-RelWithDebInfoAssert/swift-macosx-x86_64//lib
+export MACOSX_SDK=/Applications/Xcode_12.4.0_fb.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX11.1.sdk/
+
+## We build and run the test case under 3 cases:
+## no -emit-dead-strippable-symbols
+## --> runs fine
+## -Xfrontend -emit-dead-strippable-symbols -Xfrontend -disable-concrete-type-metadata-mangled-name-accessors
+## --> runs fine
+## -Xfrontend -emit-dead-strippable-symbols
+## --> crashes

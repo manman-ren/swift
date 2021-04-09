@@ -3583,25 +3583,6 @@ llvm::Constant *IRGenModule::emitSwiftProtocols() {
                                             /*isConstant*/ true,
                                             llvm::GlobalValue::PrivateLinkage);
 
-  StringRef sectionName;
-  switch (TargetInfo.OutputObjectFormat) {
-  case llvm::Triple::GOFF:
-  case llvm::Triple::UnknownObjectFormat:
-    llvm_unreachable("Don't know how to emit protocols for "
-                     "the selected object format.");
-  case llvm::Triple::MachO:
-    sectionName = "__TEXT, __swift5_protos, regular, no_dead_strip";
-    break;
-  case llvm::Triple::ELF:
-  case llvm::Triple::Wasm:
-    sectionName = "swift5_protocols";
-    break;
-  case llvm::Triple::XCOFF:
-  case llvm::Triple::COFF:
-    sectionName = ".sw5prt$B";
-    break;
-  }
-
   var->setSection(sectionName);
   
   disableAddressSanitizer(*this, var);

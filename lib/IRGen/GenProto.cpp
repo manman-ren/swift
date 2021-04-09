@@ -3807,7 +3807,7 @@ irgen::emitAssociatedTypeMetadataRef(IRGenFunction &IGF,
     auto witnessTy = sig.getType();
     witness = IGF.Builder.CreateBitCast(witness, witnessTy->getPointerTo());
 
-    FunctionPointer witnessFnPtr(FunctionPointer::KindTy::Function, witness,
+    FunctionPointer witnessFnPtr(FunctionPointer::Kind::Function, witness,
                                  sig);
 
     // Call the accessor.
