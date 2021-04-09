@@ -709,6 +709,7 @@ BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, SToUCheckedTrunc)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Expect)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Shl)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, GenericShl)
+BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, ShuffleVector)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Sizeof)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, StaticReport)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, Strideof)
@@ -775,6 +776,33 @@ OperandOwnershipBuiltinClassifier::visitCreateAsyncTaskGroupFuture(BuiltinInst *
   return OperandOwnership::InteriorPointer;
 }
 
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeNonThrowingContinuationReturning(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
+}
+
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeThrowingContinuationReturning(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
+}
+
+OperandOwnership OperandOwnershipBuiltinClassifier::
+visitResumeThrowingContinuationThrowing(BuiltinInst *bi, StringRef attr) {
+  // The value operand is consumed.
+  if (&op == &bi->getOperandRef(1))
+    return OperandOwnership::DestroyingConsume;
+
+  return OperandOwnership::TrivialUse;
+}
+
 BUILTIN_OPERAND_OWNERSHIP(InteriorPointer, CancelAsyncTask)
 BUILTIN_OPERAND_OWNERSHIP(InteriorPointer, InitializeDefaultActor)
 BUILTIN_OPERAND_OWNERSHIP(InteriorPointer, DestroyDefaultActor)
@@ -786,6 +814,8 @@ BUILTIN_OPERAND_OWNERSHIP(ForwardingBorrow, AutoDiffProjectTopLevelSubcontext)
 // FIXME: ConvertTaskToJob is documented as taking NativePointer. It's operand's
 // ownership should be 'TrivialUse'.
 BUILTIN_OPERAND_OWNERSHIP(ForwardingConsume, ConvertTaskToJob)
+
+BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildSerialExecutorRef)
 
 BUILTIN_OPERAND_OWNERSHIP(TrivialUse, AutoDiffCreateLinearMapContext)
 

@@ -382,6 +382,10 @@ namespace {
     if (paramTy->isEqual(argTy))
       return true;
 
+    // Don't favor narrowing conversions.
+    if (argTy->isDoubleType() && paramTy->isCGFloatType())
+      return false;
+
     llvm::SmallSetVector<ProtocolDecl *, 2> literalProtos;
     if (auto argTypeVar = argTy->getAs<TypeVariableType>()) {
       auto constraints = CS.getConstraintGraph().gatherConstraints(
@@ -415,7 +419,8 @@ namespace {
         // If there is a default type for the literal protocol, check whether
         // it is the same as the parameter type.
         // Check whether there is a default type to compare against.
-        if (paramTy->isEqual(defaultType))
+        if (paramTy->isEqual(defaultType) ||
+            (defaultType->isDoubleType() && paramTy->isCGFloatType()))
           return true;
       }
     }
@@ -532,7 +537,18 @@ namespace {
     
     return { nOperands, nNoDefault };
   }
-  
+
+  bool hasContextuallyFavorableResultType(AnyFunctionType *choice,
+                                          Type contextualTy) {
+    // No restrictions of what result could be.
+    if (!contextualTy)
+      return true;
+
+    auto resultTy = choice->getResult();
+    // Result type of the call matches expected contextual type.
+    return contextualTy->isEqual(resultTy);
+  }
+
   /// Favor unary operator constraints where we have exact matches
   /// for the operand and contextual type.
   void favorMatchingUnaryOperators(ApplyExpr *expr,
@@ -545,15 +561,23 @@ namespace {
       
       Type paramTy = FunctionType::composeInput(CS.getASTContext(),
                                                 fnTy->getParams(), false);
-      auto resultTy = fnTy->getResult();
-      auto contextualTy = CS.getContextualType(expr);
 
-      return isFavoredParamAndArg(
-                 CS, paramTy,
-                 CS.getType(expr->getArg())->getWithoutParens()) &&
-             (!contextualTy || contextualTy->isEqual(resultTy));
+      auto argTy = CS.getType(expr->getArg())
+                       ->getWithoutParens()
+                       ->getWithoutSpecifierType();
+
+      // There are no CGFloat overloads on some of the unary operators, so
+      // in order to preserve current behavior, let's not favor overloads
+      // which would result in conversion from CGFloat to Double; otherwise
+      // it would lead to ambiguities.
+      if (argTy->isCGFloatType() && paramTy->isDoubleType())
+        return false;
+
+      return isFavoredParamAndArg(CS, paramTy, argTy) &&
+             hasContextuallyFavorableResultType(fnTy,
+                                                CS.getContextualType(expr));
     };
-    
+
     favorCallOverloads(expr, CS, isFavoredDecl);
   }
   
@@ -704,15 +728,24 @@ namespace {
       auto firstParamTy = params[0].getOldType();
       auto secondParamTy = params[1].getOldType();
 
-      auto resultTy = fnTy->getResult();
       auto contextualTy = CS.getContextualType(expr);
+
+      // Avoid favoring overloads that would require narrowing conversion
+      // to match the arguments.
+      {
+        if (firstArgTy->isDoubleType() && firstParamTy->isCGFloatType())
+          return false;
+
+        if (secondArgTy->isDoubleType() && secondParamTy->isCGFloatType())
+          return false;
+      }
 
       return (isFavoredParamAndArg(CS, firstParamTy, firstArgTy, secondArgTy) ||
               isFavoredParamAndArg(CS, secondParamTy, secondArgTy,
                                    firstArgTy)) &&
              firstParamTy->isEqual(secondParamTy) &&
              !isPotentialForcingOpportunity(firstArgTy, secondArgTy) &&
-             (!contextualTy || contextualTy->isEqual(resultTy));
+             hasContextuallyFavorableResultType(fnTy, contextualTy);
     };
     
     favorCallOverloads(expr, CS, isFavoredDecl);
@@ -2435,7 +2468,7 @@ namespace {
           // Remove parameter labels; they aren't used when matching cases,
           // but outright conflicts will be checked during coercion.
           for (auto &param : params) {
-            param = param.getWithoutLabel();
+            param = param.getWithoutLabels();
           }
 
           Type outputType = CS.createTypeVariable(
@@ -3572,9 +3605,7 @@ static bool generateWrappedPropertyTypeConstraints(
     Type propertyType) {
   auto dc = wrappedVar->getInnermostDeclContext();
 
-  Type wrapperType = LValueType::get(initializerType);
   Type wrappedValueType;
-
   auto wrapperAttributes = wrappedVar->getAttachedPropertyWrappers();
   for (unsigned i : indices(wrapperAttributes)) {
     // FIXME: We should somehow pass an OpenUnboundGenericTypeFn to
@@ -3585,16 +3616,20 @@ static bool generateWrappedPropertyTypeConstraints(
     if (rawWrapperType->hasError() || !wrapperInfo)
       return true;
 
-    // The former wrappedValue type must be equal to the current wrapper type
-    if (wrappedValueType) {
-      auto *typeRepr = wrapperAttributes[i]->getTypeRepr();
-      auto *locator =
-          cs.getConstraintLocator(typeRepr, LocatorPathElt::ContextualType());
-      wrapperType = cs.replaceInferableTypesWithTypeVars(rawWrapperType,
-                                                         locator);
+    auto *typeExpr = wrapperAttributes[i]->getTypeExpr();
+    auto *locator = cs.getConstraintLocator(typeExpr);
+    auto wrapperType = cs.replaceInferableTypesWithTypeVars(rawWrapperType, locator);
+    cs.setType(typeExpr, wrapperType);
+
+    if (!wrappedValueType) {
+      // Equate the outermost wrapper type to the initializer type.
+      if (initializerType)
+        cs.addConstraint(ConstraintKind::Equal, wrapperType, initializerType, locator);
+    } else {
+      // The former wrappedValue type must be equal to the current wrapper type
       cs.addConstraint(ConstraintKind::Equal, wrapperType, wrappedValueType,
-                       locator);
-      cs.setContextualType(typeRepr, TypeLoc::withoutLoc(wrappedValueType),
+                       cs.getConstraintLocator(locator, LocatorPathElt::ContextualType()));
+      cs.setContextualType(typeExpr, TypeLoc::withoutLoc(wrappedValueType),
                            CTP_ComposedPropertyWrapper);
     }
 
@@ -3900,19 +3935,12 @@ bool ConstraintSystem::generateConstraints(
 
   case SolutionApplicationTarget::Kind::uninitializedWrappedVar: {
     auto *wrappedVar = target.getAsUninitializedWrappedVar();
-    auto *outermostWrapper = wrappedVar->getAttachedPropertyWrappers().front();
-    auto *typeExpr = outermostWrapper->getTypeExpr();
-    auto backingType = replaceInferableTypesWithTypeVars(
-        outermostWrapper->getType(),getConstraintLocator(typeExpr));
-
-    setType(typeExpr, backingType);
-
     auto propertyType = getVarType(wrappedVar);
     if (propertyType->hasError())
       return true;
 
     return generateWrappedPropertyTypeConstraints(
-        *this, backingType, wrappedVar, propertyType);
+        *this, /*initializerType=*/Type(), wrappedVar, propertyType);
   }
   }
 }
@@ -4063,21 +4091,7 @@ ConstraintSystem::applyPropertyWrapperToParameter(
     anchor = apply->getFn();
   }
 
-  auto supportsProjectedValueInit = [&](ParamDecl *param) -> bool {
-    if (!param->hasAttachedPropertyWrapper())
-      return false;
-
-    if (param->hasImplicitPropertyWrapper())
-      return true;
-
-    if (param->getAttachedPropertyWrappers().front()->getArg())
-      return false;
-
-    auto wrapperInfo = param->getAttachedPropertyWrapperTypeInfo(0);
-    return wrapperInfo.projectedValueVar && wrapperInfo.hasProjectedValueInit;
-  };
-
-  if (argLabel.hasDollarPrefix() && (!param || !supportsProjectedValueInit(param))) {
+  if (argLabel.hasDollarPrefix() && (!param || !param->hasExternalPropertyWrapper())) {
     if (!shouldAttemptFixes())
       return getTypeMatchFailure(locator);
 

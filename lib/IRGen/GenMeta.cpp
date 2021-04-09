@@ -262,7 +262,10 @@ static Flags getMethodDescriptorFlags(ValueDecl *fn) {
     }
     llvm_unreachable("bad kind");
   }();
-  return Flags(kind).withIsInstance(!fn->isStatic());
+  bool hasAsync = false;
+  if (auto *afd = dyn_cast<AbstractFunctionDecl>(fn))
+    hasAsync = afd->hasAsync();
+  return Flags(kind).withIsInstance(!fn->isStatic()).withIsAsync(hasAsync);
 }
 
 static void buildMethodDescriptorFields(IRGenModule &IGM,
@@ -279,7 +282,9 @@ static void buildMethodDescriptorFields(IRGenModule &IGM,
     flags = flags.withIsDynamic(true);
 
   // Include the pointer-auth discriminator.
-  if (auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods) {
+  if (auto &schema = func->hasAsync()
+                         ? IGM.getOptions().PointerAuth.AsyncSwiftClassMethods
+                         : IGM.getOptions().PointerAuth.SwiftClassMethods) {
     auto discriminator =
       PointerAuthInfo::getOtherDiscriminator(IGM, schema, fn);
     flags = flags.withExtraDiscriminator(discriminator->getZExtValue());
@@ -1677,6 +1682,10 @@ namespace {
 
         if (MetadataLayout->hasResilientSuperclass())
           flags.class_setHasResilientSuperclass(true);
+
+        if (getType()->isDefaultActor(IGM.getSwiftModule(),
+                                      ResilienceExpansion::Maximal))
+          flags.class_setIsDefaultActor(true);
       }
 
       if (ResilientSuperClassRef) {
@@ -3270,6 +3279,7 @@ namespace {
       // Find the vtable entry.
       assert(VTable && "no vtable?!");
       auto entry = VTable->getEntry(IGM.getSILModule(), fn);
+      auto *afd = cast<AbstractFunctionDecl>(fn.getDecl());
 
       // The class is fragile. Emit a direct reference to the vtable entry.
       llvm::Constant *ptr;
@@ -3283,8 +3293,14 @@ namespace {
       } else {
         // The method is removed by dead method elimination.
         // It should be never called. We add a pointer to an error function.
-        ptr = llvm::ConstantExpr::getBitCast(IGM.getDeletedMethodErrorFn(),
-                                             IGM.FunctionPtrTy);
+        if (afd->hasAsync()) {
+          ptr = llvm::ConstantExpr::getBitCast(
+              IGM.getDeletedAsyncMethodErrorAsyncFunctionPointer(),
+              IGM.FunctionPtrTy);
+        } else {
+          ptr = llvm::ConstantExpr::getBitCast(IGM.getDeletedMethodErrorFn(),
+                                               IGM.FunctionPtrTy);
+        }
       }
 
       if (IGM.getOptions().VTableMethodElimination) {
@@ -3295,7 +3311,9 @@ namespace {
         VTableEntries.push_back(std::pair<Size, SILDeclRef>(offset, fn));
       }
 
-    auto &schema = IGM.getOptions().PointerAuth.SwiftClassMethods;
+      PointerAuthSchema schema =
+          afd->hasAsync() ? IGM.getOptions().PointerAuth.AsyncSwiftClassMethods
+                          : IGM.getOptions().PointerAuth.SwiftClassMethods;
       B.addSignedPointer(ptr, schema, fn);
     }
 

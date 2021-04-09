@@ -2526,13 +2526,17 @@ void IRGenSILFunction::visitFunctionRefBaseInst(FunctionRefBaseInst *i) {
       fn, NotForDefinition, false /*isDynamicallyReplaceableImplementation*/,
       isa<PreviousDynamicFunctionRefInst>(i));
   llvm::Constant *value;
+  llvm::Constant *secondaryValue;
   if (fpKind.isAsyncFunctionPointer()) {
     value = IGM.getAddrOfAsyncFunctionPointer(fn);
     value = llvm::ConstantExpr::getBitCast(value, fnPtr->getType());
+    secondaryValue = IGM.getAddrOfSILFunction(fn, NotForDefinition);
   } else {
     value = fnPtr;
+    secondaryValue = nullptr;
   }
-  FunctionPointer fp = FunctionPointer(fpKind, value, sig);
+  FunctionPointer fp =
+      FunctionPointer::forDirect(fpKind, value, secondaryValue, sig);
 
   // Store the function as a FunctionPointer so we can avoid bitcasting
   // or thunking if we don't need to.
@@ -6134,10 +6138,19 @@ void IRGenSILFunction::visitCheckedCastAddrBranchInst(
 }
 
 void IRGenSILFunction::visitHopToExecutorInst(HopToExecutorInst *i) {
+  if (!i->getFunction()->isAsync()) {
+    // This should never occur.
+    assert(false && "The hop_to_executor should have been eliminated");
+    return;
+  }
+  assert(i->getTargetExecutor()->getType().is<BuiltinExecutorType>());
   llvm::Value *resumeFn = Builder.CreateIntrinsicCall(
           llvm::Intrinsic::coro_async_resume, {});
-          
-  emitSuspensionPoint(getLoweredSingletonExplosion(i->getOperand()), resumeFn);
+
+  Explosion executor;
+  getLoweredExplosion(i->getOperand(), executor);
+
+  emitSuspensionPoint(executor, resumeFn);
 }
 
 void IRGenSILFunction::visitKeyPathInst(swift::KeyPathInst *I) {
@@ -6524,8 +6537,10 @@ void IRGenSILFunction::visitWitnessMethodInst(swift::WitnessMethodInst *i) {
   if (IGM.isResilient(conformance.getRequirement(),
                       ResilienceExpansion::Maximal)) {
     llvm::Constant *fnPtr = IGM.getAddrOfDispatchThunk(member, NotForDefinition);
+    llvm::Constant *secondaryValue = nullptr;
 
     if (fnType->isAsync()) {
+      secondaryValue = fnPtr;
       auto *fnPtrType = fnPtr->getType();
       fnPtr = IGM.getAddrOfAsyncFunctionPointer(
           LinkEntity::forDispatchThunk(member));
@@ -6533,7 +6548,7 @@ void IRGenSILFunction::visitWitnessMethodInst(swift::WitnessMethodInst *i) {
     }
 
     auto sig = IGM.getSignature(fnType);
-    auto fn = FunctionPointer::forDirect(fnType, fnPtr, sig);
+    auto fn = FunctionPointer::forDirect(fnType, fnPtr, secondaryValue, sig);
 
     setLoweredFunctionPointer(i, fn);
     return;
@@ -6693,7 +6708,9 @@ void IRGenSILFunction::visitSuperMethodInst(swift::SuperMethodInst *i) {
     auto sig = IGM.getSignature(methodType);
     fnPtr = Builder.CreateBitCast(fnPtr, sig.getType()->getPointerTo());
 
-    auto &schema = getOptions().PointerAuth.SwiftClassMethodPointers;
+    auto &schema = methodType->isAsync()
+                       ? getOptions().PointerAuth.AsyncSwiftClassMethodPointers
+                       : getOptions().PointerAuth.SwiftClassMethodPointers;
     auto authInfo =
       PointerAuthInfo::emit(*this, schema, /*storageAddress=*/nullptr, method);
 
@@ -6805,7 +6822,8 @@ void IRGenModule::emitSILStaticInitializers() {
 void IRGenSILFunction::visitGetAsyncContinuationInst(
     GetAsyncContinuationInst *i) {
   Explosion out;
-  emitGetAsyncContinuation(i->getLoweredResumeType(), StackAddress(), out);
+  emitGetAsyncContinuation(i->getLoweredResumeType(), StackAddress(), out,
+                           i->throws());
   setLoweredExplosion(i, out);
 }
 
@@ -6813,7 +6831,8 @@ void IRGenSILFunction::visitGetAsyncContinuationAddrInst(
     GetAsyncContinuationAddrInst *i) {
   auto resultAddr = getLoweredStackAddress(i->getOperand());
   Explosion out;
-  emitGetAsyncContinuation(i->getLoweredResumeType(), resultAddr, out);
+  emitGetAsyncContinuation(i->getLoweredResumeType(), resultAddr, out,
+                           i->throws());
   setLoweredExplosion(i, out);
 }
 

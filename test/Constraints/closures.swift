@@ -377,7 +377,7 @@ func rdar21078316() {
 
 // <rdar://problem/20978044> QoI: Poor diagnostic when using an incorrect tuple element in a closure
 var numbers = [1, 2, 3]
-zip(numbers, numbers).filter { $0.2 > 1 }  // expected-error {{value of tuple type '(Int, Int)' has no member '2'}}
+zip(numbers, numbers).filter { $0.2 > 1 }  // expected-error {{value of tuple type '(Array<Int>.Element, Array<Int>.Element)' has no member '2'}}
 
 
 
@@ -1077,3 +1077,10 @@ let _: (@convention(c) () -> Void)? = Bool.random() ? nil : {} // OK on type che
 let _: (@convention(block) () -> Void)? = Bool.random() ? {} : {} // OK
 let _: (@convention(thin) () -> Void)? = Bool.random() ? {} : {} // OK
 let _: (@convention(c) () -> Void)? = Bool.random() ? {} : {} // OK on type checking, diagnostics are deffered to SIL
+
+// Make sure that diagnostic is attached to the closure even when body is empty (implicitly returns `Void`)
+var emptyBodyMismatch: () -> Int {
+  return { // expected-error {{cannot convert value of type '()' to closure result type 'Int'}}
+    return
+  }
+}
