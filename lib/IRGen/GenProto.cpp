@@ -1399,7 +1399,13 @@ public:
       Table.addSignedPointer(witness, schema, requirement);
     }
 
-    void addAssociatedConformance(AssociatedConformance requirement) {
+  unsigned NextPrivateDataIndex = 0;
+
+  unsigned getNextPrivateDataIndex() { return NextPrivateDataIndex++; }
+
+  unsigned getTablePrivateSize() { return NextPrivateDataIndex; }
+
+  void addAssociatedConformance(AssociatedConformance requirement) {
       // FIXME: Add static witness tables for type conformances.
 
       auto &entry = SILEntries.front();
@@ -1457,8 +1463,18 @@ public:
     /// protocol conformance descriptor.
     void collectResilientWitnesses(
                         SmallVectorImpl<llvm::Constant *> &resilientWitnesses);
-  };
+
+  unsigned getTablePrivateSize() { return 0; }
+};
 } // end anonymous namespace
+
+/// Return the address of a function which will return the type metadata
+/// for an associated type.
+// llvm::Constant *WitnessTableBuilderBase::
+// getAssociatedTypeMetadataAccessFunction(AssociatedType requirement,
+//                                         CanType associatedType) {
+//   return nullptr;
+// }
 
 llvm::Constant *IRGenModule::getAssociatedTypeWitness(Type type,
                                                       GenericSignature sig,
@@ -2196,6 +2212,7 @@ void IRGenModule::emitSILWitnessTable(SILWitnessTable *wt) {
   PrettyStackTraceConformance _st("emitting witness table for", conf);
 
   unsigned tableSize = 0;
+  unsigned tablePrivateSize = 0;
   llvm::GlobalVariable *global = nullptr;
   llvm::Constant *instantiationFunction = nullptr;
   bool isDependent = isDependentConformance(conf);
@@ -2220,19 +2237,63 @@ void IRGenModule::emitSILWitnessTable(SILWitnessTable *wt) {
     global->setAlignment(
         llvm::MaybeAlign(getWitnessTableAlignment().getValue()));
 
+    if (getOptions().WTableMethodElimination) {
+      global->setVCallVisibilityMetadata(
+          llvm::GlobalObject::VCallVisibility::VCallVisibilityLinkageUnit);
+      for (auto entry : wt->getEntries()) {
+        switch (entry.getKind()) {
+        case SILWitnessTable::WitnessKind::Invalid:
+          break;
+        case SILWitnessTable::WitnessKind::Method: {
+          auto mw = entry.getMethodWitness();
+          auto member = mw.Requirement;
+          auto &fnProtoInfo =
+              getProtocolInfo(conf->getProtocol(), ProtocolInfoKind::Full);
+          auto index =
+              fnProtoInfo.getFunctionIndex(member).forProtocolWitnessTable();
+          auto offset = index.getValue() * getPointerSize().getValue();
+          // llvm::errs() << "SILWitnessTable::WitnessKind::Method: " << member
+          // << ", "; llvm::errs() << offset << "\n";
+          auto entity = LinkEntity::forMethodDescriptor(member);
+          auto mangled = entity.mangleAsString();
+          global->addTypeMetadata(offset,
+                                  llvm::MDString::get(*LLVMContext, mangled));
+          break;
+        }
+        case SILWitnessTable::WitnessKind::AssociatedType:
+          break;
+        case SILWitnessTable::WitnessKind::AssociatedTypeProtocol:
+          break;
+        case SILWitnessTable::WitnessKind::BaseProtocol:
+          break;
+        }
+      }
+    }
+
     tableSize = wtableBuilder.getTableSize();
     instantiationFunction = wtableBuilder.buildInstantiationFunction();
+
+    tablePrivateSize = wt->getConditionalConformances().size() +
+                       wtableBuilder.getTablePrivateSize();
+    // tablePrivateSize = wt->getConditionalConformances().size();
   } else {
     // Build the witness table.
     ResilientWitnessTableBuilder wtableBuilder(*this, wt);
 
     // Collect the resilient witnesses to go into the conformance descriptor.
     wtableBuilder.collectResilientWitnesses(resilientWitnesses);
+
+    tablePrivateSize = wt->getConditionalConformances().size() +
+                       wtableBuilder.getTablePrivateSize();
+    // tablePrivateSize = wt->getConditionalConformances().size();
   }
+  // May not be necessary if wtableBuilder.wtableBuilder.getTablePrivateSize()
+  // returns 0.
+  if (!getOptions().WTableMethodElimination)
+    tablePrivateSize = wt->getConditionalConformances().size();
 
   // Collect the information that will go into the protocol conformance
   // descriptor.
-  unsigned tablePrivateSize = wt->getConditionalConformances().size();
   ConformanceDescription description(conf, wt, global, tableSize,
                                      tablePrivateSize, isDependent);
 
@@ -3388,10 +3449,50 @@ FunctionPointer irgen::emitWitnessMethodValue(IRGenFunction &IGF,
   // Find the witness we're interested in.
   auto &fnProtoInfo = IGF.IGM.getProtocolInfo(proto, ProtocolInfoKind::Full);
   auto index = fnProtoInfo.getFunctionIndex(member);
+
   llvm::Value *slot;
-  llvm::Value *witnessFnPtr =
-    emitInvariantLoadOfOpaqueWitness(IGF, wtable,
-                                     index.forProtocolWitnessTable(), &slot);
+  llvm::Value *witnessFnPtr;
+  if (IGF.IGM.getOptions().WTableMethodElimination) {
+    index = index.forProtocolWitnessTable();
+    slot = wtable;
+    if (index.getValue() != 0)
+      slot = IGF.Builder.CreateConstInBoundsGEP1_32(
+                 /*Ty=*/nullptr, wtable, index.getValue());
+
+    auto entity = LinkEntity::forMethodDescriptor(member);
+    auto mangled = entity.mangleAsString();
+    auto typeId = llvm::MetadataAsValue::get(
+        *IGF.IGM.LLVMContext,
+        llvm::MDString::get(*IGF.IGM.LLVMContext, mangled));
+
+    auto name = "__checked_load_" + mangled;
+    llvm::Function *checkedLoadStub = IGF.IGM.Module.getFunction(name);
+    if (!checkedLoadStub) {
+      checkedLoadStub = llvm::Function::Create(
+          llvm::FunctionType::get(IGF.IGM.Int8PtrTy, {IGF.IGM.Int8PtrTy},
+                                  false),
+          llvm::GlobalValue::ExternalLinkage, "__checked_load_" + mangled);
+      IGF.IGM.Module.getFunctionList().push_back(checkedLoadStub);
+    }
+
+    SmallVector<llvm::Value *, 8> args;
+    // auto offset = index.forProtocolWitnessTable().getValue() *
+    // IGF.IGM.getPointerSize().getValue();
+    auto ptr = IGF.Builder.CreateBitCast(slot, IGF.IGM.Int8PtrTy);
+    args.push_back(ptr);
+    // args.push_back(llvm::ConstantInt::get(IGF.IGM.Int32Ty, 0));
+    // args.push_back(typeId);
+    // llvm::errs() << "irgen::emitWitnessMethodValue" << "\n";
+    // llvm::errs() << *args[0] << "\n";
+    // llvm::errs() << *args[1] << "\n";
+    // llvm::errs() << *args[2] << "\n";
+    witnessFnPtr = IGF.Builder.CreateCall(checkedLoadStub, args);
+    // auto CheckResult = IGF.Builder.CreateExtractValue(checkedLoad, 1);
+    // auto witnessFnPtr = IGF.Builder.CreateExtractValue(checkedLoad, 0);
+  } else {
+    witnessFnPtr = emitInvariantLoadOfOpaqueWitness(IGF, wtable,
+        index.forProtocolWitnessTable(), &slot);
+  }
 
   auto fnType = IGF.IGM.getSILTypes().getConstantFunctionType(
       IGF.IGM.getMaximalTypeExpansionContext(), member);
