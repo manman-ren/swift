@@ -31,6 +31,7 @@ class TBDGenDescriptor;
 struct TBDGenOptions {
   /// Whether this compilation has multiple IRGen instances.
   bool HasMultipleIGMs = false;
+  bool VTableMethodElim = false;
 
   /// Whether this compilation is producing a TBD for InstallAPI.
   bool IsInstallAPI = false;

@@ -465,6 +465,11 @@ void TBDGenVisitor::addDispatchThunk(SILDeclRef declRef) {
 void TBDGenVisitor::addMethodDescriptor(SILDeclRef declRef) {
   auto entity = LinkEntity::forMethodDescriptor(declRef);
   addSymbol(entity);
+  if (Opts.VTableMethodElim) {
+    auto mangled = entity.mangleAsString();
+    auto name = "__checked_load_" + mangled;
+    addSymbol(name, SymbolSource::forSILDeclRef(declRef));
+  }
 }
 
 void TBDGenVisitor::addProtocolRequirementsBaseDescriptor(ProtocolDecl *proto) {
@@ -1086,6 +1091,8 @@ void TBDGenVisitor::visitProtocolDecl(ProtocolDecl *PD) {
       void addMethod(SILDeclRef declRef) {
         if (Resilient) {
           TBD.addDispatchThunk(declRef);
+          TBD.addMethodDescriptor(declRef);
+        } else {
           TBD.addMethodDescriptor(declRef);
         }
       }
