@@ -401,6 +401,30 @@ public:
     return mangleConformanceSymbol(type, C, "WL");
   }
 
+  std::string mangleAssociatedTypeMetadataAccessFunction(
+      const ProtocolConformance *Conformance, StringRef AssocTyName) {
+    beginMangling();
+    appendProtocolConformance(Conformance);
+    appendIdentifier(AssocTyName);
+    appendOperator("Wt");
+    return finalize();
+  }
+
+  std::string mangleDefaultAssociatedTypeMetadataAccessFunction(
+      const AssociatedTypeDecl *assocType) {
+    // Don't optimize away the protocol name, because we need it to distinguish
+    // among the type descriptors of different protocols.
+    llvm::SaveAndRestore<bool> optimizeProtocolNames(OptimizeProtocolNames,
+                                                     false);
+    beginMangling();
+    bool isAssocTypeAtDepth = false;
+    (void)appendAssocType(
+        assocType->getDeclaredInterfaceType()->castTo<DependentMemberType>(),
+        isAssocTypeAtDepth);
+    appendOperator("TM");
+    return finalize();
+  }
+
   std::string
   mangleAssociatedTypeAccessFunctionDiscriminator(AssociatedType association) {
     beginMangling();
