@@ -583,7 +583,7 @@ emitGlobalList(IRGenModule &IGM, ArrayRef<llvm::WeakTrackingVH> handles,
   // Mark the variable as used if doesn't have external linkage.
   // (Note that we'd specifically like to not put @llvm.used in itself.)
   if (llvm::GlobalValue::isLocalLinkage(linkage))
-    if (!IGM.IRGen.Opts.EmitDeadStrippableSymbols)
+    if (!IGM.IRGen.Opts.EmitDeadStrippableSymbols || name == "objc_classes" || name == "objc_categories")
       IGM.addUsedGlobal(var);
   return var;
 }
