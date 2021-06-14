@@ -173,6 +173,7 @@ void GlobalDCEPass::MarkLive(GlobalValue &GV,
   if (!Ret.second)
     return;
 
+  LLVM_DEBUG(dbgs() << "MarkLive of GV " << GV.getName() << '\n');
   if (Updates)
     Updates->push_back(&GV);
   if (Comdat *C = GV.getComdat()) {
@@ -371,6 +372,8 @@ setUsedInitializer(GlobalVariable &V,
   NV->takeName(&V);
   NV->setSection("llvm.metadata");
   delete &V;
+  LLVM_DEBUG(dbgs() << "Update used ------\n");
+  //NV->dump();
   return NV;
 }
 
@@ -472,6 +475,7 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     UpdateGVDependencies(GIF);
   }
 
+#if 0
   {
     // Propagate liveness from collected Global Values through the computed
     // dependencies.
@@ -486,13 +490,34 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       }
     }
   }
+#endif
 
   bool VerboseUsedConditional = getenv("VERBOSE_USED_CONDITIONAL") != nullptr;
 
-  if (LTOPostLink && Used && UsedConditional) {
+  // We need to repeat this, if a conditional used variable is marked alive and
+  // added to NewUsedArray, we should check if that will enable other conditional
+  // used variables to become alive.
+  bool HasUpdateInIteration = true;
+  LLVM_DEBUG(dbgs() << "Optimizing UsedConditional BEGIN\n");
+  //M.dump();
+  while (LTOPostLink && Used && UsedConditional && HasUpdateInIteration) {
+    // Propagate liveness from collected Global Values through the computed
+    // dependencies.
+    SmallVector<GlobalValue *, 8> NewLiveGVs{AliveGlobals.begin(),
+                                             AliveGlobals.end()};
+    while (!NewLiveGVs.empty()) {
+      GlobalValue *LGV = NewLiveGVs.pop_back_val();
+      for (auto *GVD : GVDependencies[LGV]) {
+        // errs() << LGV->getName() << " live therefore also alive: " <<
+        // GVD->getName() << "\n";
+        MarkLive(*GVD, &NewLiveGVs);
+      }
+    }
+
+    unsigned oldSize = NewUsedArray.size();
     if (VerboseUsedConditional)
-      errs() << "Optimizing UsedConditional"
-             << "\n";
+      LLVM_DEBUG(dbgs() << "Optimizing UsedConditional " << UsedConditional->getNumOperands()
+             << "\n");
     for (auto *M : UsedConditional->operands()) {
       assert(M->getNumOperands() == 3);
       auto *V = mdconst::extract_or_null<GlobalValue>(M->getOperand(0));
@@ -517,7 +542,7 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
             auto *y = x.get();
             if (!y)
               continue;
-#ifndef NDEBUG
+#if 0//ndef NDEBUG
             if (VerboseUsedConditional)
               y->dump();
 #endif
@@ -532,12 +557,12 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       bool allOthersAlive = true;
       bool anyOtherAlive = false;
       if (VerboseUsedConditional)
-        errs() << "Conditional: " << V->getName() << "\n";
+        LLVM_DEBUG(dbgs() << "Conditional: " << V->getName() << "\n");
       for (auto *GV : Others) {
         bool live = AliveGlobals.count(GV) != 0;
         if (live)
           if (VerboseUsedConditional)
-            errs() << "  <- " << GV->getName() << "\n";
+            LLVM_DEBUG(dbgs() << "  <- " << GV->getName() << "\n");
         if (live)
           anyOtherAlive = true;
         else
@@ -558,6 +583,11 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
         }
       }
     }
+    LLVM_DEBUG(dbgs() << "Optimizing UsedConditional iteration end " << oldSize << ' ' << NewUsedArray.size() << "\n");
+    HasUpdateInIteration = NewUsedArray.size() > oldSize;
+  }
+  LLVM_DEBUG(dbgs() << "Optimizing UsedConditional END\n");
+  if (LTOPostLink && Used && UsedConditional) {
 
     Used = setUsedInitializer(*Used, NewUsedArray);
     MarkLive(*Used);
